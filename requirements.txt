@@ -8,3 +8,5 @@ sentence-transformers
 python-dotenv
 pypdf
 rank-bm25
+langchain-chroma
+langchain_huggingface
