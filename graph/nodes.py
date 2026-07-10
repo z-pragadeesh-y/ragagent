@@ -26,20 +26,16 @@ Answer:"""
 
 
 def retrieve_node(state: RAGState) -> dict:
-    """Retrieves top-k relevant chunks for the question."""
     vectorstore = load_vectorstore()
-    docs = vectorstore.similarity_search(state["question"], k=RETRIEVAL_K)
+    docs = vectorstore.similarity_search(state["rewritten_question"], k=RETRIEVAL_K)
     return {"retrieved_docs": docs}
 
 
 def check_relevance_node(state: RAGState) -> dict:
-    """Checks if retrieved docs are similar enough to bother generating an answer."""
     vectorstore = load_vectorstore()
     results_with_scores = vectorstore.similarity_search_with_score(
-        state["question"], k=RETRIEVAL_K
+        state["rewritten_question"], k=RETRIEVAL_K
     )
-
-    # Chroma's default here returns L2 distance: LOWER = more similar (not a 0-1 score)
     is_relevant = any(distance < 1.0 for _, distance in results_with_scores)
     return {"is_relevant": is_relevant}
 
@@ -71,3 +67,27 @@ def out_of_scope_node(state: RAGState) -> dict:
 def route_after_relevance_check(state: RAGState) -> str:
     """Conditional edge function: decides which node runs next."""
     return "generate" if state["is_relevant"] else "out_of_scope"
+REWRITE_PROMPT_TEMPLATE = """Rewrite the following user question to be clearer and more specific,
+optimized for semantic search against a document knowledge base. Keep the same intent and meaning
+— do not add new topics. If the question is already clear and specific, return it unchanged.
+Return ONLY the rewritten question, nothing else.
+
+Original question: {question}
+
+Rewritten question:"""
+
+
+def rewrite_query_node(state: RAGState) -> dict:
+    """Rewrites the raw question into a clearer, retrieval-friendly form."""
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        api_key=os.getenv("GROQ_API_KEY"),
+        temperature=0,
+    )
+    prompt = ChatPromptTemplate.from_template(REWRITE_PROMPT_TEMPLATE)
+    chain = prompt | llm
+
+    response = chain.invoke({"question": state["question"]})
+    rewritten = response.content.strip()
+
+    return {"rewritten_question": rewritten}    

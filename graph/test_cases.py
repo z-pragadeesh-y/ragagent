@@ -29,8 +29,12 @@ def run_tests():
 
     for question, expected_relevant, expected_domain in TEST_CASES:
         result = graph.invoke({
-            "question": question, "retrieved_docs": [], "answer": "", "is_relevant": False
-        })
+    "question": question,
+    "rewritten_question": "",
+    "retrieved_docs": [],
+    "answer": "",
+    "is_relevant": False,
+})
 
         actual_relevant = result["is_relevant"]
         sources = [d.metadata.get("source", "") for d in result.get("retrieved_docs", [])]
