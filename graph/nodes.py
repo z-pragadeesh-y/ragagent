@@ -67,18 +67,29 @@ def out_of_scope_node(state: RAGState) -> dict:
 def route_after_relevance_check(state: RAGState) -> str:
     """Conditional edge function: decides which node runs next."""
     return "generate" if state["is_relevant"] else "out_of_scope"
-REWRITE_PROMPT_TEMPLATE = """Rewrite the following user question to be clearer and more specific,
-optimized for semantic search against a document knowledge base. Keep the same intent and meaning
-— do not add new topics. If the question is already clear and specific, return it unchanged.
+
+
+
+REWRITE_PROMPT_TEMPLATE = """Given the conversation history and a new question, rewrite the new question
+to be a clear, standalone, specific question optimized for semantic search — resolving any pronouns or
+implied references (like "it", "that", "its") using the conversation history. If the question is already
+standalone and specific, return it unchanged. Do not answer the question, only rewrite it.
 Return ONLY the rewritten question, nothing else.
 
-Original question: {question}
+Conversation history:
+{history}
+
+New question: {question}
 
 Rewritten question:"""
 
 
 def rewrite_query_node(state: RAGState) -> dict:
-    """Rewrites the raw question into a clearer, retrieval-friendly form."""
+    """Rewrites the raw question into a clearer, standalone, retrieval-friendly form."""
+    history_text = "\n".join(
+        f"{turn['role']}: {turn['content']}" for turn in state.get("chat_history", [])
+    ) or "(no previous turns)"
+
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=os.getenv("GROQ_API_KEY"),
@@ -87,7 +98,15 @@ def rewrite_query_node(state: RAGState) -> dict:
     prompt = ChatPromptTemplate.from_template(REWRITE_PROMPT_TEMPLATE)
     chain = prompt | llm
 
-    response = chain.invoke({"question": state["question"]})
+    response = chain.invoke({"history": history_text, "question": state["question"]})
     rewritten = response.content.strip()
 
-    return {"rewritten_question": rewritten}    
+    return {"rewritten_question": rewritten}
+def update_history_node(state: RAGState) -> dict:
+    """Appends the current Q&A turn to chat history, for use in future turns."""
+    history = state.get("chat_history", [])
+    updated = history + [
+        {"role": "user", "content": state["question"]},
+        {"role": "assistant", "content": state["answer"]},
+    ]
+    return {"chat_history": updated}    

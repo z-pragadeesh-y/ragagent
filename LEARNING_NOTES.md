@@ -188,4 +188,42 @@ Phase 1's `main.py` was a function calling a function: `retrieve() → generate(
 
 ---
 
+## Phase 3 — Query Rewriting
+
+### The Big Picture: Why Rewrite the Query at All?
+
+Retrieval quality is entirely dependent on how well the *query's embedding* matches the *chunk's embedding*. If a user's raw question is vague, terse, or oddly phrased, the embedding of that raw text may not land close to the embeddings of the chunks that actually answer it — even though a well-phrased version of the same question would. Query rewriting inserts a cheap LLM call *before* retrieval to "clean up" the question into a form that's more likely to retrieve well, without changing what the user actually meant.
+
+This is a different kind of fix than Phase 2's `k=8` band-aid: that fix widened the net *after* an imprecise query; this fix tries to make the query itself more precise *before* casting the net. Both are legitimate, complementary techniques — real RAG systems use both.
+
+---
+
+### `rewrite_query_node` — How It Works
+
+**What it does:** Sends the raw question to Groq with a prompt instructing it to rewrite for clarity/specificity, preserving intent, and to return the question unchanged if it's already fine.
+
+**Core concept: prompt-based query transformation.** This is one of the simplest members of a whole family of "query transformation" techniques in RAG (others include query decomposition — breaking a complex question into sub-questions, and HyDE — generating a hypothetical answer and embedding *that* instead of the question, which is Plan 1 Step 7 later in this project). All of them share the same underlying idea: **the text you embed for search doesn't have to be the literal text the user typed** — you can transform it first if the transformed version searches better.
+
+**Why keep the original `question` in state alongside `rewritten_question`, rather than overwriting it?** Two reasons: (1) you want to show the user their own original question in a chat UI, not a robotically-rewritten version; (2) keeping both makes debugging much easier — if retrieval seems off, you can directly compare what was asked vs. what was actually searched for, rather than losing that information.
+
+---
+
+### Why the Vague-Query Test Result Matters (deep dive)
+
+The "tell me about risks" test is worth understanding carefully because it demonstrates the **limits of what query rewriting alone can fix.**
+
+**What rewriting *can* fix:** ambiguity in *phrasing* — typos, awkward grammar, overly terse wording, missing implied words. Given enough surrounding words in the question itself, an LLM can usually infer what's meant and produce a clearer version.
+
+**What rewriting *cannot* fix:** ambiguity in *missing information that simply isn't in the question at all*. "Tell me about risks" doesn't contain any signal — explicit or implicit — about which domain the user means. No amount of clever rewriting can conjure information that was never provided. The LLM correctly produced a more polished *generic* version, because that's the only faithful rewrite possible without inventing an assumption the user didn't state.
+
+**Why did the answer blend multiple domains, and is that "wrong"?** Given a generic query, our vector search (still doing plain top-8 similarity search, unchanged since Phase 2) will naturally retrieve whatever is closest across the *entire* corpus — and since "risk" is a real term discussed meaningfully in 3 of our 5 documents (AI, economics, climate), a generic query will legitimately retrieve real, relevant content from all three. The generator then does what it's instructed to do: synthesize an answer from the provided context. Every sentence in that answer is traceable to real retrieved content — so it's not hallucinated or factually wrong. It's just **not what a real user probably wanted.**
+
+**The actual fix for this belongs to later phases, specifically:**
+- **Phase 4 (conversation memory):** if this were turn 2 of a conversation where turn 1 was about AI policy, we could infer "risks" means AI risks specifically, using conversation history — no clarification needed.
+- **Plan 1 Step 2 (agentic router):** could detect that a query is too ambiguous to route confidently and either ask a clarifying question back to the user, or explicitly search across domains and clearly *label* the answer as multi-domain rather than blending it seamlessly.
+
+**The general lesson:** not every RAG problem is a retrieval problem or a generation problem — some are fundamentally an *information availability* problem (the system literally cannot know what wasn't told to it), and the correct fix is architectural (add memory, add clarification-asking) rather than tuning existing components harder.
+
+---
+
 *(This file will be extended with a new section after each subsequent phase completes.)*

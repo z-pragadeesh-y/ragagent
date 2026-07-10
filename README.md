@@ -129,4 +129,25 @@ Ran a batch of 10 test questions — one per domain, several clearly out-of-scop
 
 ---
 
+### Phase 3 — Query Rewriting ✅ Complete (with a documented open gap)
+**What was done:**
+Added a new node, `rewrite_query_node`, as the **first step** in the graph (runs before retrieval). It sends the user's raw question to Groq with an instruction to rewrite it into a clearer, more retrieval-friendly form while preserving intent — returning the question unchanged if it's already clear. The original `question` field is kept untouched in state (for display/logging); a new `rewritten_question` field is what actually gets used for retrieval and relevance checking going forward.
+
+**Verification (3 rounds):**
+1. **Full 10-question regression suite** — still 10/10 passed after adding rewriting, confirming it doesn't break already-well-formed questions.
+2. **Targeted well-formed vs. out-of-scope check** — a clear AI-policy question got sharpened appropriately (kept intent, added specificity) and a clearly out-of-scope question (chocolate chip cookie recipe) stayed correctly flagged as out-of-scope even after rewriting — rewriting doesn't accidentally smuggle irrelevant questions into scope.
+3. **Genuinely vague query test** ("tell me about risks") — the real test this phase exists for. The rewrite correctly stayed generic (since the original gave no domain hint), but this then exposed an honest, expected limitation: retrieval pulled `k=8` chunks spanning *multiple* domains (AI, economics, climate all discuss "risk"), and generation blended them into one answer that was factually accurate per-claim but not clearly useful to a user who likely meant one specific domain.
+
+**Important honesty note (not glossed over):** This blended-answer behavior for vague queries is **not a bug being silently left in place** — it's a structural gap that genuinely cannot be fixed at this phase, because fixing it requires either (a) conversation context to infer intent from prior turns (Phase 4 — not built yet), or (b) an explicit routing/clarification mechanism (Plan 1 Step 2's agentic router). Logging this now gives a clean, honest baseline to compare against once those are built.
+
+**New files created/modified (Phase 3), and why:**
+- `graph/nodes.py` (modified) — added `rewrite_query_node` and its prompt template; updated `retrieve_node` and `check_relevance_node` to search using `rewritten_question` instead of the raw `question`
+- `graph/state.py` (modified) — added `rewritten_question` field to `RAGState`
+- `graph/build_graph.py` (modified) — added `rewrite_query` as the new entry node (`START → rewrite_query → retrieve → ...`), updated the `__main__` test block to print the rewritten query alongside the answer
+- `graph/test_cases.py` (modified) — updated the initial state dict passed to `graph.invoke()` to include the new `rewritten_question` key, keeping the regression suite compatible with the updated state shape
+
+**Result:** Query rewriting works correctly and safely for both clear and out-of-scope questions, and has surfaced — rather than hidden — a real, expected limitation around domain-ambiguous vague queries, which is now a documented, intentional handoff point to Phase 4 and Plan 1 Step 2.
+
+---
+
 *(This section will be extended after each subsequent phase completes.)*
