@@ -150,4 +150,28 @@ Added a new node, `rewrite_query_node`, as the **first step** in the graph (runs
 
 ---
 
+### Phase 4 — Conversation Memory & Persistence ✅ Complete (with a documented compounding limitation)
+**What was done:**
+Added conversational memory to the graph using LangGraph's built-in **checkpointing** mechanism (`SqliteSaver`), which persists the full graph state — including a running `chat_history` list — to a local `checkpoints.sqlite` file, keyed by a `thread_id`. This means conversation state now survives across separate script runs, not just within a single Python process. `rewrite_query_node` was upgraded to take this history into account, resolving pronouns and implied references (e.g., "its," "that") from prior turns into standalone, specific queries before retrieval. A new `update_history_node` appends each completed turn (question + answer) to history at the end of the graph, so the next invocation on the same `thread_id` has it available.
+
+**Bug hit and fixed during setup:** the initial checkpointer setup used `SqliteSaver.from_conn_string(...)` combined with a manual `.__enter__()` call — this is fragile because it's meant to be used inside a `with` block, and calling `__enter__()` directly let the underlying connection get garbage-collected and closed prematurely, causing a `sqlite3.ProgrammingError: Cannot operate on a closed database`. Fixed by creating a raw, always-open `sqlite3.connect(..., check_same_thread=False)` connection and passing it directly to `SqliteSaver(conn)` instead.
+
+**Second bug hit and fixed:** the test script was passing `"chat_history": []` on every turn (not just the first), which overwrote the checkpointer's automatically-restored history each time — silently defeating the entire point of persistence. Fixed by only seeding `chat_history` on the first turn of a conversation and omitting it afterward, letting the checkpointer supply the real accumulated history automatically.
+
+**Verification (2 rounds):**
+1. **Single-hop follow-up test** (AI domain): Turn 1 asked about the AI Risk Management Framework's purpose; Turn 2 asked "what about its economic risks specifically?" — the rewrite correctly resolved "its" to explicitly reference the AI Risk Management Framework, and the answer stayed correctly AI-focused. This directly fixes the exact gap documented at the end of Phase 3.
+2. **Multi-hop cross-domain test** (Health → Climate → Climate-specific, 3 turns): history resolution itself worked correctly at every turn (each rewrite was a well-formed, appropriately-referenced standalone question). However, Turn 2 ("how is that connected to climate change?") retrieved **zero** chunks from the Climate document — all 8 retrieved chunks were from the Health document, confirmed by direct inspection of retrieval scores. The rewritten query stayed too anchored to "WHO report" phrasing from Turn 1, which kept the query embedding close to Health-doc vocabulary even though the question was fundamentally asking to bridge two domains.
+
+**Important honesty note (not glossed over):** This multi-hop failure is not a new Phase 4 bug — history resolution did its job correctly. It's a **compounding effect of two already-documented limitations**: Phase 2's finding that plain vector similarity search can't reliably distinguish "topically close" from "actually the right content," and Phase 3's finding that query rewriting can only work with the information it's given, and here it reasonably-but-unhelpfully over-anchored to one document's framing. This is a clean, concrete case for why **Plan 1 Step 1 (hybrid retrieval + reranking)** and **Plan 1 Step 2 (agentic router with query decomposition, which could split a cross-domain question into separate sub-queries per domain)** are necessary — single-vector-search retrieval has a structural ceiling that better query rewriting alone cannot fully overcome.
+
+**New files created/modified (Phase 4), and why:**
+- `graph/state.py` (modified) — added `chat_history: List[dict]` field to `RAGState`
+- `graph/nodes.py` (modified) — upgraded `rewrite_query_node`'s prompt to take conversation history into account for pronoun/reference resolution; added new `update_history_node` to append completed turns to history
+- `graph/build_graph.py` (modified) — added `update_history` as a new terminal node before `END`; added SQLite-backed checkpointing (`SqliteSaver` wired to a raw, persistent `sqlite3.connect` connection) so conversation state survives across runs, keyed by `thread_id`
+- `checkpoints.sqlite` (generated, not hand-written) — the actual persistent conversation storage file, created automatically on first run
+
+**Result:** The system now has real short-term conversational memory that persists across sessions and correctly resolves single-hop follow-up references. A genuine, well-diagnosed multi-hop cross-domain retrieval limitation was found and documented (not silently patched), directly motivating the next planned improvements in Plan 1.
+
+---
+
 *(This section will be extended after each subsequent phase completes.)*

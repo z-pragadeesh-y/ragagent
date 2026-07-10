@@ -226,4 +226,53 @@ The "tell me about risks" test is worth understanding carefully because it demon
 
 ---
 
+## Phase 4 — Conversation Memory & Persistence
+
+### The Big Picture: From Stateless to Stateful
+
+Every phase so far has treated each `graph.invoke()` call as a completely independent event — no memory of anything before it. Real conversations aren't like that: people say "it," "that," "the one you mentioned," and expect the system to resolve those references using earlier context. Phase 4 turns the graph from **stateless** (each call starts from scratch) into **stateful** (each call can build on accumulated history), and makes that state **persistent** (survives even after the Python process exits and restarts).
+
+---
+
+### Core Concept: Checkpointing
+
+**What a checkpointer does:** After every step (or at defined points) in a LangGraph run, the checkpointer saves a snapshot of the current state to storage, tagged with a `thread_id` (think of this like a conversation/session ID). The next time you call `graph.invoke(..., config={"configurable": {"thread_id": "same-id"}})`, LangGraph automatically loads the most recent saved state for that `thread_id` *before* running, merges your new input into it, and proceeds. This is what makes multi-turn behavior possible without you manually managing a growing history object yourself in application code.
+
+**Why SQLite for now, not Redis/PostgreSQL (per the original roadmap)?** SQLite requires zero setup — no server process, no connection config, just a local file. It's the correct tool for *learning the checkpointing concept itself* without fighting infrastructure. Critically, LangGraph's checkpointer interface is designed so that `SqliteSaver` and something like `PostgresSaver`/`RedisSaver` are largely interchangeable — once you understand this concept, swapping the backend later (for a production-style setup, matching your original roadmap's mention of Redis/PostgreSQL) is a small, well-understood change, not a redesign.
+
+**Why `thread_id` matters:** it's what lets a single deployed system serve *many separate, non-interfering conversations at once* — user A's conversation and user B's conversation just use different `thread_id`s, and the checkpointer keeps their histories completely separate within the same SQLite file. This is the same conceptual pattern a real multi-user chat backend would use.
+
+---
+
+### Two Real Bugs Hit — and Why They're Worth Understanding
+
+**Bug 1: the closed-database error.**
+`SqliteSaver.from_conn_string(...)` is a Python **generator-based context manager** — it's designed to be used as `with SqliteSaver.from_conn_string(...) as checkpointer:`, where the `with` block keeps the underlying connection alive for as long as you're inside it. Manually calling `.__enter__()` outside of an actual `with` block technically "starts" the context manager, but nothing is holding a strong reference to keep it alive — Python's garbage collector can (and did) clean it up early, silently closing the database connection out from under us. **The general lesson:** context managers exist specifically to tie a resource's lifetime to a well-defined block of code; bypassing that pattern (even when it looks like it works, like it "ran" without erroring immediately) reintroduces exactly the resource-lifetime bugs `with` blocks are designed to prevent. The fix — a plain `sqlite3.connect()` kept alive as a normal Python object for the life of the app — is simpler and more predictable specifically because it doesn't rely on generator/context-manager lifetime subtleties.
+
+**Bug 2: history silently not persisting.**
+This one didn't throw an error at all — it just quietly didn't work as intended (turn 2's rewrite stayed vague first time around). The cause: our own test code was passing `"chat_history": []` into *every* `graph.invoke()` call, including turn 2. LangGraph's checkpointer restores prior state, but any keys you *explicitly* include in your new input for that call take precedence — so we were unintentionally stomping the very history we'd just built. **The general lesson:** when using any kind of state-merging/checkpointing system, be careful about what you pass on every call versus what should be left to the system's own restoration mechanism — passing "just to be safe" defaults can silently override real accumulated state, and this class of bug is especially dangerous because it fails *quietly* (no crash, no warning) rather than loudly.
+
+---
+
+### Why the Multi-Hop Cross-Domain Test Result Matters (deep dive)
+
+This is one of the most instructive results in the whole project so far, because it shows two *correctly working* components (history resolution, and grounded generation) still producing an unsatisfying end result — proving that **"every individual piece works" doesn't automatically mean "the whole system works well."**
+
+**Step by step what happened:**
+1. Turn 1 established context clearly around the WHO Health report
+2. Turn 2 asked "how is that connected to climate change?" — genuinely a cross-domain bridging question
+3. `rewrite_query_node` did its job correctly: it produced a fully standalone, well-formed question that explicitly named "the WHO report on global health" **and** "climate change" — a faithful, accurate rewrite of the user's intent
+4. But that rewritten query, when embedded and searched, stayed vector-close to Health-doc content (because "WHO report... life expectancy... causes of death" is a lot of Health-specific vocabulary, versus one mention of "climate change") — so **all 8** retrieved chunks came from the Health document, **zero** from the Climate document, confirmed directly via `similarity_search_with_score`
+5. Generation correctly refused to fabricate a connection it wasn't given evidence for — again, the grounding instruction worked exactly as designed
+
+**So where did it actually go wrong?** Not in rewriting, not in generation — in the assumption baked into our retrieval design that **one single vector search is sufficient for any question**, even ones that inherently span two different documents/topics. A single embedding is a single point in vector space; it can be close to *Health* content or close to *Climate* content, but a genuinely 50/50 cross-domain question doesn't necessarily land near *both* — it's more likely to land near whichever domain's vocabulary happens to dominate the phrasing.
+
+**Why this directly motivates upcoming work:**
+- **Hybrid retrieval + reranking (Plan 1 Step 1)** — combining keyword-based search (BM25) with vector search, and reranking candidates from *both* Health and Climate documents, would give cross-domain content a better chance of surfacing even if the pure embedding leaned one way.
+- **Agentic router with query decomposition (Plan 1 Step 2)** — the more structurally correct fix: recognizing a question like this genuinely spans two domains and **splitting it into two sub-queries** ("What does WHO say about global health?" + "What does climate change do to global health?"), retrieving separately for each, then combining — rather than forcing one query to do the work of two.
+
+**The broader lesson to carry forward:** in agentic/RAG system design, individually-correct components chained together do not guarantee a correct end-to-end result. Testing needs to happen at the *system* level (full conversational flows, cross-domain edge cases), not just at the level of "does each node do its documented job" — because Phase 4 here is a clear example of every node doing exactly what it was designed to do, while the overall conversation still fell short of what a user would actually want.
+
+---
+
 *(This file will be extended with a new section after each subsequent phase completes.)*

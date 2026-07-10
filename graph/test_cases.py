@@ -1,7 +1,10 @@
 """
 Manual verification script: runs a batch of test questions across all 5 domains
-plus edge cases, to sanity-check Phase 1 + Phase 2 behavior before moving on.
+plus edge cases, to sanity-check Phases 1-4 behavior before moving on to Plan 1/2.
+Each question runs in its own isolated thread_id, so results never leak between
+unrelated test cases via shared conversation history.
 """
+import uuid
 from graph.build_graph import build_graph
 
 TEST_CASES = [
@@ -18,8 +21,8 @@ TEST_CASES = [
     ("What is the capital of France?", False, None),
 
     # Borderline / cross-domain (real stress test)
-    ("How does climate change affect public health outcomes?", True, None),  # could pull from doc2 or doc4
-    ("What economic risks does AI pose according to policy frameworks?", True, None),  # doc1 or doc3
+    ("How does climate change affect public health outcomes?", True, None),
+    ("What economic risks does AI pose according to policy frameworks?", True, None),
 ]
 
 
@@ -28,13 +31,17 @@ def run_tests():
     results = []
 
     for question, expected_relevant, expected_domain in TEST_CASES:
+        # Fresh, unique thread_id per test case -> no history leakage between test cases
+        config = {"configurable": {"thread_id": f"test-{uuid.uuid4()}"}}
+
         result = graph.invoke({
-    "question": question,
-    "rewritten_question": "",
-    "retrieved_docs": [],
-    "answer": "",
-    "is_relevant": False,
-})
+            "question": question,
+            "rewritten_question": "",
+            "retrieved_docs": [],
+            "answer": "",
+            "is_relevant": False,
+            "chat_history": [],
+        }, config=config)
 
         actual_relevant = result["is_relevant"]
         sources = [d.metadata.get("source", "") for d in result.get("retrieved_docs", [])]
