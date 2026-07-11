@@ -1,20 +1,19 @@
 """
 Loads a local (free) embedding model and generates embeddings for chunks.
 """
+import torch
 from langchain_huggingface import HuggingFaceEmbeddings
-from ingestion.loader import load_documents
-from ingestion.chunker import chunk_documents
 
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 def get_embedding_model():
-    """Returns a local HuggingFace embedding model (runs on CPU, no API calls)."""
+    """Returns a local HuggingFace embedding model, using GPU if available."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     return HuggingFaceEmbeddings(
         model_name=EMBEDDING_MODEL_NAME,
-        model_kwargs={"device": "cpu"},
+        model_kwargs={"device": device},
         encode_kwargs={"normalize_embeddings": True},
     )
-
 
 if __name__ == "__main__":
     docs = load_documents()

@@ -7,7 +7,7 @@ from sentence_transformers import CrossEncoder
 from ingestion.loader import load_documents
 from ingestion.chunker import chunk_documents
 from ingestion.vectorstore import load_vectorstore
-
+import torch
 RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # Cached globals so we don't rebuild BM25/reload chunks on every call
@@ -33,7 +33,9 @@ def _get_reranker():
     """Loads (once) the local cross-encoder reranker model."""
     global _reranker
     if _reranker is None:
-        _reranker = CrossEncoder(RERANKER_MODEL_NAME)
+    
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _reranker = CrossEncoder(RERANKER_MODEL_NAME, device=device)
     return _reranker
 
 

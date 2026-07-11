@@ -29,15 +29,19 @@ def build_vectorstore():
     return vectorstore
 
 
-def load_vectorstore():
-    """Loads an already-built Chroma DB from disk (no re-embedding)."""
-    embedder = get_embedding_model()
-    return Chroma(
-        collection_name=COLLECTION_NAME,
-        embedding_function=embedder,
-        persist_directory=PERSIST_DIR,
-    )
+_cached_vectorstore = None
 
+def load_vectorstore():
+    """Loads an already-built Chroma DB from disk (cached after first call)."""
+    global _cached_vectorstore
+    if _cached_vectorstore is None:
+        embedder = get_embedding_model()
+        _cached_vectorstore = Chroma(
+            collection_name=COLLECTION_NAME,
+            embedding_function=embedder,
+            persist_directory=PERSIST_DIR,
+        )
+    return _cached_vectorstore
 
 if __name__ == "__main__":
     vs = build_vectorstore()
