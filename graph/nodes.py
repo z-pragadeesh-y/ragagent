@@ -7,10 +7,10 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from ingestion.vectorstore import load_vectorstore
 from graph.state import RAGState
-
+from ingestion.hybrid_retriever import hybrid_retrieve
 load_dotenv()
 
-RETRIEVAL_K = 8  # increased from 4 to reduce missed-context failures on broad questions
+RETRIEVAL_K = 4  # hybrid retrieval + reranking is more precise, so we no longer need k=8 as a band-aid  # increased from 4 to reduce missed-context failures on broad questions
 
 PROMPT_TEMPLATE = """You are a helpful assistant answering questions using ONLY the provided context.
 Synthesize an answer from the relevant parts of the context, even if the information is spread across
@@ -26,12 +26,13 @@ Answer:"""
 
 
 def retrieve_node(state: RAGState) -> dict:
-    vectorstore = load_vectorstore()
-    docs = vectorstore.similarity_search(state["rewritten_question"], k=RETRIEVAL_K)
+    """Retrieves relevant chunks using hybrid (BM25 + vector) search with cross-encoder reranking."""
+    docs = hybrid_retrieve(state["rewritten_question"], fusion_k=15, final_k=RETRIEVAL_K)
     return {"retrieved_docs": docs}
 
 
 def check_relevance_node(state: RAGState) -> dict:
+    """Checks relevance using the same hybrid retrieval, then a distance-based fallback check."""
     vectorstore = load_vectorstore()
     results_with_scores = vectorstore.similarity_search_with_score(
         state["rewritten_question"], k=RETRIEVAL_K
