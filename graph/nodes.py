@@ -32,12 +32,8 @@ def retrieve_node(state: RAGState) -> dict:
 
 
 def check_relevance_node(state: RAGState) -> dict:
-    """Checks relevance using the same hybrid retrieval, then a distance-based fallback check."""
-    vectorstore = load_vectorstore()
-    results_with_scores = vectorstore.similarity_search_with_score(
-        state["rewritten_question"], k=RETRIEVAL_K
-    )
-    is_relevant = any(distance < 1.0 for _, distance in results_with_scores)
+    """Checks relevance based on whether hybrid retrieval actually found any candidates."""
+    is_relevant = len(state.get("retrieved_docs", [])) > 0
     return {"is_relevant": is_relevant}
 
 
@@ -73,9 +69,14 @@ def route_after_relevance_check(state: RAGState) -> str:
 
 REWRITE_PROMPT_TEMPLATE = """Given the conversation history and a new question, rewrite the new question
 to be a clear, standalone, specific question optimized for semantic search — resolving any pronouns or
-implied references (like "it", "that", "its") using the conversation history. If the question is already
-standalone and specific, return it unchanged. Do not answer the question, only rewrite it.
-Return ONLY the rewritten question, nothing else.
+implied references (like "it", "that", "its") using the conversation history.
+
+IMPORTANT: Preserve any acronyms, technical terms, or proper nouns EXACTLY as the user wrote them
+(e.g., "RAG", "HyDE", "NIST", "IPCC", "IMF", "WHO") — do NOT expand or replace them with their full form,
+since exact terminology matters for search accuracy.
+
+If the question is already standalone and specific, return it unchanged. Do not answer the question,
+only rewrite it. Return ONLY the rewritten question, nothing else.
 
 Conversation history:
 {history}
@@ -110,4 +111,54 @@ def update_history_node(state: RAGState) -> dict:
         {"role": "user", "content": state["question"]},
         {"role": "assistant", "content": state["answer"]},
     ]
-    return {"chat_history": updated}    
+    return {"chat_history": updated} 
+from graph.router import route_query
+from ingestion.hybrid_retriever import hybrid_retrieve
+
+def router_node(state: RAGState) -> dict:
+    """Classifies the rewritten question into a routing category."""
+    result = route_query(state["rewritten_question"])
+    return {"route_category": result["category"], "sub_questions": result["sub_questions"]}
+
+
+def direct_answer_node(state: RAGState) -> dict:
+    """Handles greetings/meta questions without any retrieval."""
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        api_key=os.getenv("GROQ_API_KEY"),
+        temperature=0,
+    )
+    prompt = ChatPromptTemplate.from_template(
+        "You are a helpful assistant for a knowledge base covering AI policy, climate change, "
+        "economics, public health, and AI research. Respond briefly and naturally to: {question}"
+    )
+    chain = prompt | llm
+    response = chain.invoke({"question": state["question"]})
+    return {"answer": response.content}
+
+
+def decompose_retrieve_node(state: RAGState) -> dict:
+    """Retrieves separately for each sub-question, then combines results."""
+    all_docs = []
+    seen_content = set()
+    for sub_q in state["sub_questions"]:
+        docs = hybrid_retrieve(sub_q, fusion_k=15, final_k=3)
+        for doc in docs:
+            if doc.page_content not in seen_content:
+                all_docs.append(doc)
+                seen_content.add(doc.page_content)
+    return {"retrieved_docs": all_docs, "is_relevant": len(all_docs) > 0}
+
+
+def route_after_classification(state: RAGState) -> str:
+    """Conditional edge: decides graph path based on router category."""
+    category = state["route_category"]
+    if category == "direct":
+        return "direct_answer"
+    elif category == "decompose":
+        return "decompose_retrieve"
+    elif category == "out_of_scope":
+        return "out_of_scope"
+    else:  # "simple"
+        return "retrieve"
+   

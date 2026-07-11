@@ -15,17 +15,19 @@ _bm25_index = None
 _bm25_chunks = None
 _reranker = None
 
+import re
 
+def _tokenize(text: str) -> list[str]:
+    """Lowercase and strip punctuation before splitting, so tokens like '(HyDE)' match 'hyde'."""
+    return re.findall(r"\b\w+\b", text.lower())
 def _get_bm25_index():
-    """Builds (once) a BM25 index over the same chunks used for the vector store."""
     global _bm25_index, _bm25_chunks
     if _bm25_index is None:
         docs = load_documents()
         _bm25_chunks = chunk_documents(docs)
-        tokenized = [c.page_content.lower().split() for c in _bm25_chunks]
+        tokenized = [_tokenize(c.page_content) for c in _bm25_chunks]
         _bm25_index = BM25Okapi(tokenized)
     return _bm25_index, _bm25_chunks
-
 
 def _get_reranker():
     """Loads (once) the local cross-encoder reranker model."""
@@ -57,7 +59,7 @@ def hybrid_retrieve(query: str, fusion_k: int = 15, final_k: int = 4):
     vector_ids = [doc.page_content for doc in vector_results]  # using content as a simple unique key
 
     # 2. BM25 search (keyword)
-    tokenized_query = query.lower().split()
+    tokenized_query = _tokenize(query)
     bm25_scores = bm25_index.get_scores(tokenized_query)
     bm25_ranked_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:fusion_k]
     bm25_ids = [bm25_chunks[i].page_content for i in bm25_ranked_indices]

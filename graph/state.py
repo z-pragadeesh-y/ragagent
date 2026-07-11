@@ -11,4 +11,6 @@ class RAGState(TypedDict):
     retrieved_docs: List[Document]
     answer: str
     is_relevant: bool
-    chat_history: List[dict]  # [{"role": "user"/"assistant", "content": "..."}]
+    chat_history: List[dict]
+    route_category: str
+    sub_questions: List[str]

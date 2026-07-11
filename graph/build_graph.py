@@ -1,6 +1,6 @@
 """
-Builds the LangGraph state machine: rewrite -> retrieve -> check -> generate/out_of_scope -> update_history.
-Persists conversation state to a local SQLite file via LangGraph's checkpointer.
+Builds the LangGraph state machine with agentic routing:
+rewrite -> route -> [direct_answer | retrieve -> check_relevance -> generate/out_of_scope | decompose_retrieve -> generate] -> update_history
 """
 import sqlite3
 from langgraph.graph import StateGraph, START, END
@@ -14,6 +14,10 @@ from graph.nodes import (
     route_after_relevance_check,
     rewrite_query_node,
     update_history_node,
+    router_node,
+    direct_answer_node,
+    decompose_retrieve_node,
+    route_after_classification,
 )
 
 
@@ -21,26 +25,45 @@ def build_graph():
     workflow = StateGraph(RAGState)
 
     workflow.add_node("rewrite_query", rewrite_query_node)
+    workflow.add_node("router", router_node)
+    workflow.add_node("direct_answer", direct_answer_node)
     workflow.add_node("retrieve", retrieve_node)
+    workflow.add_node("decompose_retrieve", decompose_retrieve_node)
     workflow.add_node("check_relevance", check_relevance_node)
     workflow.add_node("generate", generate_node)
     workflow.add_node("out_of_scope", out_of_scope_node)
     workflow.add_node("update_history", update_history_node)
 
     workflow.add_edge(START, "rewrite_query")
-    workflow.add_edge("rewrite_query", "retrieve")
+    workflow.add_edge("rewrite_query", "router")
+
+    workflow.add_conditional_edges(
+        "router",
+        route_after_classification,
+        {
+            "direct_answer": "direct_answer",
+            "retrieve": "retrieve",
+            "decompose_retrieve": "decompose_retrieve",
+            "out_of_scope": "out_of_scope",
+        },
+    )
+
     workflow.add_edge("retrieve", "check_relevance")
     workflow.add_conditional_edges(
         "check_relevance",
         route_after_relevance_check,
         {"generate": "generate", "out_of_scope": "out_of_scope"},
     )
+
+    # Decomposed retrieval skips the relevance-check gate and goes straight to generation,
+    # since sub-questions were already router-approved as in-scope topics
+    workflow.add_edge("decompose_retrieve", "generate")
+
+    workflow.add_edge("direct_answer", "update_history")
     workflow.add_edge("generate", "update_history")
     workflow.add_edge("out_of_scope", "update_history")
     workflow.add_edge("update_history", END)
 
-    # Persistent checkpointing: raw sqlite3 connection, kept alive for the app's lifetime.
-    # check_same_thread=False is required because LangGraph may access it from different threads.
     conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
     checkpointer = SqliteSaver(conn)
 
@@ -49,27 +72,31 @@ def build_graph():
 
 if __name__ == "__main__":
     graph = build_graph()
-    config = {"configurable": {"thread_id": "test-conversation-1"}}
 
-    turns = [
+    test_questions = [
+        "Hi, what can you help me with?",
         "What is the AI Risk Management Framework meant to help organizations do?",
-        "What about its economic risks specifically?",
+        "How does climate change affect health, and what does WHO recommend for adaptation?",
+        "What's the weather like tomorrow?",
     ]
 
-    for i, question in enumerate(turns):
-        input_state = {
+    for i, question in enumerate(test_questions):
+        config = {"configurable": {"thread_id": f"router-test-{i}"}}
+        result = graph.invoke({
             "question": question,
             "rewritten_question": "",
             "retrieved_docs": [],
             "answer": "",
             "is_relevant": False,
-        }
-        if i == 0:
-            input_state["chat_history"] = []  # only seed empty history on the very first turn
-
-        result = graph.invoke(input_state, config=config)
+            "chat_history": [],
+            "route_category": "",
+            "sub_questions": [],
+        }, config=config)
 
         print(f"Question: {question}")
-        print(f"Rewritten: {result['rewritten_question']}")
-        print(f"Answer: {result['answer']}\n")
+        print(f"Category: {result['route_category']}")
+        if result["sub_questions"]:
+            print(f"Sub-questions: {result['sub_questions']}")
+        print(f"Sources: {[d.metadata.get('source') for d in result['retrieved_docs']]}")
+        print(f"Answer: {result['answer'][:250]}\n")
         print("-" * 60)
