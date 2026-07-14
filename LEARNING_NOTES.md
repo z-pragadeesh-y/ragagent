@@ -386,4 +386,52 @@ Throughout this project, several real limitations were found and deliberately le
 
 ---
 
+## Plan 1, Step 3 — Corrective Retrieval Loop (CRAG)
+
+### The Big Picture: From "Did We Retrieve Something" to "Did We Retrieve the Right Thing"
+
+Every relevance check before this point (Phase 2's original check, Step 2's fix) answered a crude question: "did retrieval return *any* candidates?" CRAG asks a fundamentally better question: "are the candidates we got *actually relevant* to this specific question?" — and, crucially, gives the system a chance to **try again with a different approach** if the answer is no, rather than either forcing a bad answer through or giving up immediately on the first attempt.
+
+### Concept: LLM-as-Grader, and Why Batching It Matters
+
+Grading each retrieved chunk individually (one LLM call per chunk) is the "obvious" first implementation, but it's expensive - `k=4` chunks means 4 extra LLM calls per question just for grading, before generation even happens. Batching all chunks into a **single** LLM call (one prompt containing all passages, expecting one multi-line response) cuts this dramatically, at the cost of a new failure mode: if the LLM's response doesn't perfectly align (wrong line count, extra commentary), the pairing between chunks and verdicts can silently break. This tradeoff - cost savings vs. a new class of parsing risk - is a genuine engineering decision, not a free win, and it's exactly what caused the truncation bug described below.
+
+### The Truncation Bug: A Lesson in Silent, "Reasonable" Failures
+
+This bug is worth sitting with, because at every step it looked *correct*: the LLM was given a passage, judged it based on what it actually saw, and confidently said "no" - a perfectly reasonable judgment given a truncated passage that read as tangential without its payoff sentence. Nothing crashed, nothing looked obviously wrong in isolation. The only way this was caught was by refusing to accept "it says no" at face value for a case we already knew should say "yes" (the HyDE regression), and tracing backward: raw LLM response → passage content → truncation point → exact character index of the missing term. **The general lesson:** when an LLM-based component gives a plausible-sounding but wrong answer, the bug is often not in the LLM's reasoning at all - it's in what information the LLM was actually given. Always check the literal input before assuming the model's judgment is flawed.
+
+### The Threshold Bug: Arbitrary Constants Deserve Scrutiny
+
+`len(graded_docs) >= max(1, len(docs) // 2)` ("at least half must pass") was written without much thought, the kind of constant that feels reasonable by default. But it silently assumes that a batch of chunks is evaluated as a group, when relevance is actually per-chunk: one excellent, directly-answering chunk is not improved by having 3 other mediocre chunks fail alongside it. Lowering the bar to "at least one relevant chunk is enough" isn't just a bug fix - it's a correction to a subtly wrong mental model of how grading should work. **The general lesson:** any arbitrary numeric threshold in code (a percentage, a "half," a magic count) deserves a moment of "does this actually reflect how the thing being measured works," not just "does this number seem reasonable."
+
+### Why the Router's Rate-Limit Fallback Direction Matters (fail closed vs. fail open)
+
+Defaulting to `"simple"` when the router couldn't be reached seems harmless - "just try to answer, worst case it says it doesn't know." But it actually let clearly out-of-scope questions get treated as if they were legitimate, in-scope queries, with retrieval running unnecessarily and results being reported as "relevant" when they weren't. Switching the default to `"out_of_scope"` is an example of **failing closed**: when a system can't make a confident decision, default to the safer, more restrictive behavior (assume "no") rather than the more permissive one (assume "yes"). This principle shows up throughout security and reliability engineering - ambiguity should bias toward caution, not convenience.
+
+---
+
+## Infrastructure Upgrade — Multi-Provider LLM Failover
+
+### Why This Wasn't Premature Engineering
+
+It would be easy to dismiss building a whole provider-failover system as "over-engineering" for a learning project - but this was built in direct, immediate response to a real, repeated, measured problem: Groq's free-tier daily quota was genuinely exhausted multiple times during Step 3's debugging, each time blocking real verification work for hours. This is the healthiest way to justify infrastructure complexity: not "production systems usually have this," but "we hit this exact wall ourselves, more than once, and it cost real time."
+
+### Concept: The Runnable Interface, and Why It Matters Here
+
+LangChain's `Runnable` is the base interface that every chain-able component (prompts, models, output parsers) implements, all sharing a common `.invoke()` method and supporting the `|` pipe syntax. By making `LLMManager` itself a `Runnable` subclass, it can be dropped into `prompt | llm` exactly where a single `ChatGroq` or `ChatOpenAI` instance used to go - every existing node's code structure stayed almost identical, only the *source* of the `llm` variable changed (`get_llm(task=...)` instead of a hardcoded `ChatGroq(...)`). This is a good example of designing to an existing interface rather than inventing a new calling convention - it made this large architectural change far less invasive than it could have been.
+
+### Concept: Generic Error Classification vs. Provider-Specific Exception Handling
+
+An alternative, more naive design would import `groq.RateLimitError`, `google.api_core.exceptions.ResourceExhausted`, `openai.RateLimitError`, etc., and check for each explicitly. This works, but tightly couples the failover logic to every provider's SDK, meaning adding a new provider later requires editing the core retry logic itself. Instead, `errors.py` classifies failures by inspecting common, informal signals - a `status_code` attribute if present, and keywords in the exception's class name (`"ratelimit"`, `"timeout"`, `"authenticat"`) - which works reasonably well across very different SDKs without importing any of them. This is a real tradeoff: less precise than exhaustive per-provider handling, but far more maintainable and provider-agnostic, which matters more for a system meant to keep growing new providers over time.
+
+### Concept: Task-Based Routing (Lanes) as a Cost/Quality Tradeoff
+
+The two-lane split (`simple` vs `complex`) encodes a real judgment: not all LLM calls are equally important. Routing, rewriting, and grading are structured, mostly-mechanical judgments where a slightly-less-capable model is an acceptable tradeoff; final answer generation is where a user actually reads and judges output quality, so it deserves the best available model first. This is a form of **cost-aware architecture** - treating "which model handles this call" as a real design decision tied to the call's actual importance, not a single blanket choice applied uniformly everywhere. It directly targets the root cause of the day's quota problem: CRAG's retry loop multiplies rewrite/route/grade calls significantly, so moving exactly those calls off Groq (while keeping Groq for the one call per question that matters most) is a precisely-targeted fix, not a blunt one.
+
+### The Latency Tradeoff: An Honest, Accepted Cost
+
+Moving high-frequency calls to NVIDIA's free-tier endpoint measurably slowed the system down, since it doesn't share Groq's unusually fast custom-hardware inference. This wasn't a surprise to be treated as a new bug - it's an accepted, understood cost of the actual goal (resilience under a real quota constraint), verified and confirmed rather than glossed over. Recognizing when a tradeoff is a deliberate, correct engineering decision - rather than either ignoring it or panicking over it - is itself part of good engineering judgment.
+
+---
+
 *(This file will be extended with a new section after each subsequent phase/step completes.)*

@@ -1,8 +1,8 @@
 """
 Manual verification script: runs a batch of test questions across all 5 domains
-plus edge cases, to sanity-check Phases 1-4 behavior before moving on to Plan 1/2.
-Each question runs in its own isolated thread_id, so results never leak between
-unrelated test cases via shared conversation history.
+plus edge cases, to sanity-check the full pipeline (Phases 1-4 + Plan 1 Steps 1-3)
+before moving on. Each question runs in its own isolated thread_id, so results
+never leak between unrelated test cases via shared conversation history.
 """
 import uuid
 from graph.build_graph import build_graph
@@ -41,6 +41,10 @@ def run_tests():
             "answer": "",
             "is_relevant": False,
             "chat_history": [],
+            "route_category": "",
+            "sub_questions": [],
+            "retry_count": 0,
+            "grading_passed": False,
         }, config=config)
 
         actual_relevant = result["is_relevant"]
