@@ -1,13 +1,17 @@
 """
 Agentic router: classifies a query into one of 4 paths before retrieval.
+Uses the SIMPLE lane (NVIDIA NIM -> local LM Studio) since routing is a
+structured, low-reasoning, JSON-shaped task - Groq's quota is reserved for
+the complex/generation lane.
 """
-import os
 import json
-from dotenv import load_dotenv
-from langchain_groq import ChatGroq
+import logging
 from langchain_core.prompts import ChatPromptTemplate
 
-load_dotenv()
+from llm.task_router import get_llm
+from llm.errors import AllProvidersFailedError
+
+logger = logging.getLogger("llm_manager")
 
 ROUTER_PROMPT_TEMPLATE = """You are a query router for a RAG system with a knowledge base covering exactly
 these 5 topics: AI policy/risk management (NIST AI RMF), climate change (IPCC AR6), global economics (IMF
@@ -31,17 +35,19 @@ JSON response:"""
 
 
 def route_query(question: str) -> dict:
-    """Returns {'category': ..., 'sub_questions': [...]}."""
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        api_key=os.getenv("GROQ_API_KEY"),
-        temperature=0,
-    )
+    """Returns {'category': ..., 'sub_questions': [...]}.
+    Falls back to 'out_of_scope' (the safe default) if every provider fails,
+    or if the LLM's output can't be parsed as valid routing JSON."""
+    llm = get_llm(task="route", temperature=0)
     prompt = ChatPromptTemplate.from_template(ROUTER_PROMPT_TEMPLATE)
     chain = prompt | llm
 
-    response = chain.invoke({"question": question})
-    raw = response.content.strip()
+    try:
+        response = chain.invoke({"question": question})
+        raw = response.content.strip()
+    except AllProvidersFailedError:
+        logger.error("Router: all providers failed - defaulting to out_of_scope for safety")
+        return {"category": "out_of_scope", "sub_questions": []}
 
     # Strip markdown code fences if the model adds them despite instructions
     if raw.startswith("```"):
@@ -54,7 +60,10 @@ def route_query(question: str) -> dict:
         return parsed
     except (json.JSONDecodeError, ValueError):
         # Safe fallback: if the router output is malformed, treat as "simple"
-        # rather than crashing the whole graph.
+        # rather than crashing the whole graph. This is a SEPARATE safety net
+        # from the provider-failover one above - it handles the case where a
+        # provider DID respond, but its response wasn't valid routing JSON.
+        logger.warning(f"Router: could not parse LLM output as valid JSON: {raw!r} - defaulting to simple")
         return {"category": "simple", "sub_questions": []}
 
 

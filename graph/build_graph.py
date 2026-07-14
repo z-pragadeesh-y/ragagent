@@ -1,6 +1,6 @@
 """
-Builds the LangGraph state machine with agentic routing:
-rewrite -> route -> [direct_answer | retrieve -> check_relevance -> generate/out_of_scope | decompose_retrieve -> generate] -> update_history
+Builds the LangGraph state machine with agentic routing + corrective retrieval (CRAG):
+rewrite -> route -> [direct_answer | retrieve -> check_relevance -> grade_documents -> (generate | reformulate_query -> retrieve loop | out_of_scope) | decompose_retrieve -> generate] -> update_history
 """
 import sqlite3
 from langgraph.graph import StateGraph, START, END
@@ -18,6 +18,9 @@ from graph.nodes import (
     direct_answer_node,
     decompose_retrieve_node,
     route_after_classification,
+    grade_documents_node,
+    reformulate_query_node,
+    route_after_grading,
 )
 
 
@@ -30,6 +33,8 @@ def build_graph():
     workflow.add_node("retrieve", retrieve_node)
     workflow.add_node("decompose_retrieve", decompose_retrieve_node)
     workflow.add_node("check_relevance", check_relevance_node)
+    workflow.add_node("grade_documents", grade_documents_node)
+    workflow.add_node("reformulate_query", reformulate_query_node)
     workflow.add_node("generate", generate_node)
     workflow.add_node("out_of_scope", out_of_scope_node)
     workflow.add_node("update_history", update_history_node)
@@ -52,10 +57,17 @@ def build_graph():
     workflow.add_conditional_edges(
         "check_relevance",
         route_after_relevance_check,
-        {"generate": "generate", "out_of_scope": "out_of_scope"},
+        {"generate": "grade_documents", "out_of_scope": "out_of_scope"},
     )
 
-    # Decomposed retrieval skips the relevance-check gate and goes straight to generation,
+    workflow.add_conditional_edges(
+        "grade_documents",
+        route_after_grading,
+        {"generate": "generate", "reformulate": "reformulate_query", "out_of_scope": "out_of_scope"},
+    )
+    workflow.add_edge("reformulate_query", "retrieve")  # loop back to retry retrieval
+
+    # Decomposed retrieval skips the relevance-check/grading gate and goes straight to generation,
     # since sub-questions were already router-approved as in-scope topics
     workflow.add_edge("decompose_retrieve", "generate")
 
@@ -91,12 +103,15 @@ if __name__ == "__main__":
             "chat_history": [],
             "route_category": "",
             "sub_questions": [],
+            "retry_count": 0,
+            "grading_passed": False,
         }, config=config)
 
         print(f"Question: {question}")
         print(f"Category: {result['route_category']}")
         if result["sub_questions"]:
             print(f"Sub-questions: {result['sub_questions']}")
+        print(f"Retry count: {result['retry_count']}")
         print(f"Sources: {[d.metadata.get('source') for d in result['retrieved_docs']]}")
         print(f"Answer: {result['answer'][:250]}\n")
         print("-" * 60)

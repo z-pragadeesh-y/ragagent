@@ -14,3 +14,5 @@ class RAGState(TypedDict):
     chat_history: List[dict]
     route_category: str
     sub_questions: List[str]
+    retry_count: int
+    grading_passed: bool
