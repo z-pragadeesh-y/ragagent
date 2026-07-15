@@ -3,6 +3,8 @@ Loads a local (free) embedding model and generates embeddings for chunks.
 """
 import torch
 from langchain_huggingface import HuggingFaceEmbeddings
+from ingestion.loader import load_documents
+from ingestion.chunker import chunk_documents
 
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
