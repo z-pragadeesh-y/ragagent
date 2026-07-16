@@ -434,4 +434,36 @@ Moving high-frequency calls to NVIDIA's free-tier endpoint measurably slowed the
 
 ---
 
+## Plan 1, Step 4 — RAGAS-Style Evaluation
+
+### The Big Picture: From "Looks Right" to "Measurably Right"
+
+Every prior phase and step was verified by manually reading test outputs and judging "does this look correct." That's valuable but doesn't scale, isn't quantitative, and depends entirely on which questions you happen to think to test. RAGAS-style evaluation formalizes this: a fixed, verified golden set of question/answer pairs, scored automatically and consistently across 4 specific dimensions, producing numbers you can track over time and compare across changes (e.g., "did Step 1's hybrid retrieval actually improve context precision, on average, across 30 questions" - a much stronger claim than "it seemed to work on the cases I tried").
+
+### Concept: The 4 RAGAS Metrics, and Why Each One Exists
+
+**Faithfulness** answers: "is the model making things up?" It checks the generated answer strictly against the *retrieved context* - not the ground truth, not general knowledge. A perfectly faithful answer might still be *wrong* if the retrieved context itself was wrong or insufficient; faithfulness only measures whether the model stayed honest about what it was given.
+
+**Answer relevancy** answers: "did the model actually answer the question?" A perfectly faithful, well-grounded response that still dodges or misses the actual question asked would score low here, even with high faithfulness.
+
+**Context precision** answers: "was retrieval noisy?" - of the chunks retrieved, what fraction were actually useful. This is a pure retrieval-quality metric, independent of what the generator did with those chunks afterward.
+
+**Context recall** answers: "did retrieval miss something important?" - checked against the ground truth (not the generated answer), since a generator could fail to *use* good context that recall would still credit as present.
+
+**Why all four together matter:** a RAG system can fail in different combinations - great retrieval but poor synthesis (high precision/recall, low faithfulness/relevancy), or confident-sounding hallucination on top of poor retrieval (low precision/recall, deceptively acceptable-looking answer). Measuring only one metric can hide the other failure mode entirely.
+
+### Why the Official RAGAS Package Broke, and Why That Wasn't Worth Fighting Forever
+
+This project's LangChain stack is on the 1.x major version line - a significant, breaking-change release relative to the 0.x line most RAG tutorials and libraries (including RAGAS at the versions available) were built against. Trying three different RAGAS versions (newest to oldest) revealed the honest boundary: even the oldest, most conservative RAGAS release explicitly pins `langchain<0.3`, meaning **no version of this particular library was ever going to work** with this project's stack - this wasn't a version-pinning mistake to iterate past, it was a structural incompatibility. The general lesson: when every reasonable version of a dependency conflicts with your existing stack, that's a signal to stop trying more versions and seriously consider building the needed functionality yourself, rather than treating "keep trying versions" as inherently more efficient than a from-scratch implementation. In this case, the custom implementation was actually *less* total work than the version-hunting already spent, and produced a more transparent, better-integrated result.
+
+### Concept: LLM-as-Judge, and Its Own Faithfulness Problem
+
+Building a "judge" that itself is an LLM creates a subtle risk worth understanding deeply: the judge can hallucinate its own "corrections" if it isn't explicitly grounded in verified facts, exactly the same class of problem the whole project has been fighting in the *system being evaluated*. This is precisely what happened with the NIST trustworthiness-characteristics case: the judge, given only the question and answer (no ground truth), fell back on its own training-data memory of what it "thought" NIST's framework said - and that memory was wrong, but stated with full confidence. This is a genuinely important, generalizable lesson: **any LLM-as-judge system needs the same grounding discipline as the system it's evaluating** - a judge given free rein to use "its own knowledge" as the standard of truth is really just hallucination-checking against a second, unverified hallucination.
+
+### Why Some "Wrong-Looking" Faithfulness Scores Were Left Alone
+
+After fixing the grounding bug, a handful of faithfulness scores still looked surprising - 0.0 on answers that were clearly, factually correct. The temptation here is to treat every surprising score as another bug to chase and fix. But faithfulness is deliberately checking something narrower and stricter than "is this answer true" - it's checking "is this answer's specific phrasing directly traceable to this specific retrieved text." Real retrieved chunks are often imperfect: cut off mid-sentence by chunking boundaries, containing paraphrased rather than verbatim language, or missing connective context that got left in a neighboring chunk. A strict, literal faithfulness check can correctly say "not directly supported by *this specific text*" even when a human would recognize the underlying fact as true and well-established. Loosening the faithfulness prompt to be more lenient here would feel like it "fixes" these cases, but it would also make the metric less sensitive to real hallucination elsewhere - the same leniency that excuses a technically-correct-but-imperfectly-grounded answer would also excuse a genuinely fabricated one. Recognizing when a metric's strictness is a feature, not a flaw, and resisting the urge to loosen it away, is itself a mature evaluation-design decision.
+
+---
+
 *(This file will be extended with a new section after each subsequent phase/step completes.)*
