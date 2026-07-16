@@ -5,3 +5,4 @@ __pycache__/
 .chroma/
 .vscode/
 checkpoints.sqlite-*
+checkpoints.sqlite
