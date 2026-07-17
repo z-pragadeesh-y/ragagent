@@ -362,4 +362,26 @@ Also built a second, separate Chroma collection (`ragagent_structured`) so the n
 
 ---
 
+### Step 2 — HyDE Query Expansion ✅ Complete
+**What was done:**
+Built `ingestion/hyde.py`, implementing Hypothetical Document Embeddings: instead of embedding the raw user query for vector search, an LLM first generates a short hypothetical passage that would plausibly answer the question (in the style of a technical/policy document), and that passage is embedded instead. The intuition: a hypothetical *answer* passage tends to sit closer, in embedding space, to real answer passages than a short, differently-phrased *question* does — directly targeting the query/answer embedding mismatch that contributed to earlier documented retrieval gaps (e.g. Phase 1's original NIST-attribution failure).
+
+Wired into `ingestion/hybrid_retriever.py` via a new `use_hyde` parameter: when enabled, the HyDE passage is used only for the vector-search leg of hybrid retrieval — BM25 keyword search deliberately continues using the raw original query, since HyDE's prose-style passage is not keyword-dense and would hurt exact-term matching rather than help it. Added `"hyde"` as a new task name in `llm/task_router.py`'s simple lane (NVIDIA-first), consistent with the project's existing quota-protection design from Plan 1 Step 3.
+
+**A real bug was found and fixed before HyDE could be trusted:** the initial HyDE prompt produced passages wrapped in meta-commentary — "Here is a short, factual passage..." preambles and trailing "**Note:** This passage is written in a style consistent with..." disclaimers — which would have polluted the embedding with irrelevant wrapper text rather than pure hypothetical content. Fixed with an explicit "output ONLY the passage" instruction plus defensive line-level cleanup as a second safety net, verified via direct inspection of the raw generated passage before trusting it in retrieval.
+
+**Investigation of an initially confusing "no difference" result:** a direct with/without-HyDE comparison through the full `hybrid_retrieve()` pipeline, even on a deliberately hard, awkwardly-phrased query ("org steps for handling AI dangers per government guidance"), returned identical final results. Rather than assume HyDE wasn't working, this was investigated at the vector-search-only level (bypassing BM25 fusion and reranking) — which confirmed HyDE genuinely does change the vector search candidate pool, retrieving different chunks than the raw query alone. The "no difference" in final output was correctly attributed to the cross-encoder reranker's robustness: regardless of which upstream method (BM25 vs. HyDE-enhanced vector search) contributed which candidates, the reranker converges on the same, genuinely best final chunks. This is a positive finding about the pipeline's overall resilience, not evidence that HyDE provides no value — HyDE's contribution may matter more in cases where the reranker's candidate pool is thinner or more genuinely ambiguous.
+
+**Verification:** full 10-question regression suite passed (10/10) after wiring HyDE into `retrieve_node`, confirming no regressions from the added LLM call per retrieval.
+
+**New files created/modified (Plan 2 Step 2):**
+- `ingestion/hyde.py` — new module: HyDE passage generation with a fail-safe fallback to the raw query, plus defensive preamble-stripping cleanup
+- `ingestion/hybrid_retriever.py` (modified) — added `use_hyde` parameter, applied only to the vector-search leg
+- `llm/task_router.py` (modified) — added `"hyde"` to `SIMPLE_TASKS`
+- `graph/nodes.py` (modified) — `retrieve_node` now calls `hybrid_retrieve(..., use_hyde=True)`
+
+**Result:** HyDE is live in the retrieval pipeline, with a real prompt-quality bug caught and fixed before it could silently degrade retrieval, and genuine (not assumed) confirmation that it changes retrieval behavior at the mechanism level, alongside an honest finding about why its effect wasn't visible in final top-k results for the specific test cases tried.
+
+---
+
 *(This section will be extended after each subsequent step/phase completes.)*

@@ -518,4 +518,24 @@ Building `ragagent_structured` as a *separate* collection alongside the existing
 
 ---
 
+## Plan 2, Step 2 — HyDE Query Expansion
+
+### The Big Picture: Questions and Answers Don't Look Alike
+
+A core, somewhat counterintuitive limitation of embedding-based search: questions and their answers are often *linguistically dissimilar*, even when they're a perfect semantic match. "What does NIST say organizations should do about AI risks?" is short, interrogative, and question-shaped; the actual answer passage is likely long, declarative, and dense with domain terminology the question never used. Embedding models capture meaning well, but a short question and a long descriptive passage can still end up further apart in embedding space than two passages that are both written in "answer style." HyDE sidesteps this by converting the *query* into something that's already answer-shaped before embedding it - comparing answer-style text to answer-style text, rather than question-style text to answer-style text.
+
+### Why the Preamble Bug Mattered More Than It Might Seem
+
+At first glance, "the LLM added a sentence saying 'here is a passage'" sounds like a cosmetic annoyance, easily ignored. But this is an *embedding* pipeline, not a text-display pipeline - every word in the generated passage becomes part of what gets embedded and searched with. A wrapper sentence like "Here is a short, factual passage..." shifts the embedding's semantic center of mass toward generic meta-language about writing passages, diluting the actual topical content the passage is supposed to represent. This is a good example of a bug that's easy to underestimate if you only look at the *text* superficially ("it still contains the right information") without considering *how that text is actually used downstream* (as a dense vector, where every token contributes to the final embedding).
+
+### Why "No Difference in Final Results" Needed Investigation, Not Acceptance
+
+This is one of the better examples in the whole project of resisting a tempting, wrong conclusion. The natural reading of "with-HyDE and without-HyDE gave identical top-4 results" is "HyDE isn't doing anything - maybe it's not implemented correctly, or maybe it's not useful here." Both are plausible-sounding explanations, and either could have been accepted without further work. But accepting either would have been premature - the investigation needed to isolate *which stage* of the multi-stage retrieval pipeline (vector search → BM25 → RRF fusion → reranking) the "no difference" was actually occurring at. Testing vector search alone revealed the true, more interesting story: HyDE **is** working, changing real candidates at that stage - the "sameness" only emerges after reranking smooths over the difference. This matters because it changes the entire interpretation: it's not "HyDE does nothing," it's "the reranker is doing its job well enough that upstream retrieval method differences don't always survive to the final answer" - a completely different, more nuanced, and more positive finding about the pipeline as a whole.
+
+### Concept: Selective Application - Not Every Technique Applies Uniformly
+
+A subtle but important design decision: HyDE was deliberately applied *only* to the vector-search leg of hybrid retrieval, not to BM25. This required understanding *why* HyDE works (embedding-space proximity) versus *why* BM25 works (literal keyword/term overlap) as genuinely different mechanisms - a hypothetical answer passage helps the former and would actively hurt the latter, since BM25 needs literal query terms to match against literal document terms, and a paraphrased hypothetical passage might use entirely different vocabulary than the user's actual query terms. Blindly applying "the new technique" everywhere, without considering whether its underlying mechanism actually fits each consumer, would have been a subtler mistake than an outright bug - a working-but-suboptimal implementation that silently underperforms without ever throwing an error.
+
+---
+
 *(This file will be extended with a new section after each subsequent phase/step completes.)*
