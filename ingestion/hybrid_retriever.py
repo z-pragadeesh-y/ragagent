@@ -58,7 +58,7 @@ def reciprocal_rank_fusion(vector_ranked_ids, bm25_ranked_ids, k=60):
     return scores
 
 
-def hybrid_retrieve(query: str, fusion_k: int = 15, final_k: int = 4, domain_tag: str = None):
+def hybrid_retrieve(query: str, fusion_k: int = 15, final_k: int = 4, domain_tag: str = None, use_hyde: bool = False):
     """
     Full pipeline: vector search + BM25 search -> RRF fusion -> cross-encoder rerank -> top final_k.
     If domain_tag is provided, both vector search and the BM25 candidate pool are restricted
@@ -68,11 +68,19 @@ def hybrid_retrieve(query: str, fusion_k: int = 15, final_k: int = 4, domain_tag
     vectorstore = load_structured_vectorstore()
     bm25_index, bm25_chunks = _get_bm25_index()
 
+    # HyDE: vector search uses a hypothetical answer passage instead of the raw
+    # query, but BM25 keeps using the raw query - HyDE passages are prose, not
+    # keyword-dense, so they'd actually hurt exact-term keyword matching.
+    vector_search_query = query
+    if use_hyde:
+        from ingestion.hyde import generate_hyde_passage
+        vector_search_query = generate_hyde_passage(query)
+
     # 1. Vector search (semantic) - get more candidates than we need
     vector_kwargs = {"k": fusion_k}
     if domain_tag:
         vector_kwargs["filter"] = {"domain_tag": domain_tag}
-    vector_results = vectorstore.similarity_search(query, **vector_kwargs)
+    vector_results = vectorstore.similarity_search(vector_search_query, **vector_kwargs)
     vector_ids = [doc.page_content for doc in vector_results]
 
     # 2. BM25 search (keyword) - restrict candidate pool to the domain if given

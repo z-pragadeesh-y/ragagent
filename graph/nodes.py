@@ -67,8 +67,9 @@ Respond with one yes/no per line, {count} lines total:"""
 
 
 def retrieve_node(state: RAGState) -> dict:
-    """Retrieves relevant chunks using hybrid (BM25 + vector) search with cross-encoder reranking."""
-    docs = hybrid_retrieve(state["rewritten_question"], fusion_k=15, final_k=RETRIEVAL_K)
+    """Retrieves relevant chunks using hybrid (BM25 + vector) search with cross-encoder reranking.
+    Uses HyDE (hypothetical document embeddings) for the vector search leg."""
+    docs = hybrid_retrieve(state["rewritten_question"], fusion_k=15, final_k=RETRIEVAL_K, use_hyde=True)
     return {"retrieved_docs": docs}
 
 

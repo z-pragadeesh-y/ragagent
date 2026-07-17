@@ -19,7 +19,7 @@ Usage in a node:
 from llm.manager import get_llm_manager
 from llm.providers import COMPLEX_PROVIDER_BUILDERS, SIMPLE_PROVIDER_BUILDERS
 
-SIMPLE_TASKS = {"rewrite", "route", "grade"}
+SIMPLE_TASKS = {"rewrite", "route", "grade", "hyde"}
 COMPLEX_TASKS = {"generate", "decompose"}
 
 
