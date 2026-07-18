@@ -16,3 +16,4 @@ class RAGState(TypedDict):
     sub_questions: List[str]
     retry_count: int
     grading_passed: bool
+    citations: List[dict]

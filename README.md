@@ -384,4 +384,29 @@ Wired into `ingestion/hybrid_retriever.py` via a new `use_hyde` parameter: when 
 
 ---
 
+### Step 3 — Citation & Attribution ✅ Complete
+**What was done:**
+Built `graph/citation_node.py`, a dedicated node run immediately after `generate_node`, that adds verifiable source attribution to every answer. `generate_node`'s prompt now labels each retrieved chunk `[Source N]` in the context and instructs the model to cite inline (e.g., "AI risks include bias [Source 1]"). `citation_node` then validates every citation marker the model actually produced against the real `retrieved_docs` list — any `[Source N]` referencing a number outside the range of chunks that were genuinely retrieved (a hallucinated citation) is detected and silently stripped, with a logged warning. A References list is appended to the final answer, built entirely from real chunk metadata (document title, section, domain) captured back in Plan 2 Step 1's structure-aware chunking — never invented by the LLM. Structured citation data is also returned separately on state (`citations` field), so API consumers can display citations distinctly from answer text rather than only as appended plain text.
+
+**This work was continued from a handoff with another Claude session, and 3 real bugs were found in the handoff and fixed before it could be trusted:**
+1. `generate_node` called a helper function (`_build_numbered_context_and_references`) that was never actually defined in the file — would have crashed immediately on first use.
+2. `citation_node` was correctly built and imported into `build_graph.py`, but never actually wired into the graph with edges — `generate` still connected directly to `update_history`, meaning citation validation would silently never run despite the node existing and looking correctly implemented.
+3. `api/main.py`'s `_run_graph_sync` was changed to return a dict (`{"answer", "citations"}`) instead of a plain string, but the semantic cache's `get`/`set` calls and both endpoint handlers still treated the result as a bare string in some places — a type mismatch that would have broken caching.
+
+**Verification:**
+- Full 10-question regression suite passed (10/10), with real `[Source N]` citations visibly appearing inline in generated answers.
+- Direct inspection via `build_graph.py`'s test run confirmed structured citation data — real document titles, section titles, and domain tags — correctly attached to answers across `simple` and `decompose` paths, and correctly empty (no citations attempted) for `direct`/`out_of_scope` paths that never retrieved documents.
+- **The hallucination-guard itself was directly tested**, not just assumed to work: a synthetic test fed `citation_node` an answer containing a fabricated `[Source 5]` citation against only 2 real retrieved documents — confirmed the invalid marker was correctly detected, logged, and stripped, while the two genuinely valid citations (`[Source 1]`, `[Source 2]`) were preserved untouched.
+
+**New files created/modified (Plan 2 Step 3):**
+- `graph/citation_node.py` — new module: builds real References list from chunk metadata, validates and strips hallucinated citation markers, returns structured `citations` data
+- `graph/nodes.py` (modified) — `generate_node`'s prompt now requests inline `[Source N]` citations; added `_build_labeled_context()` helper
+- `graph/build_graph.py` (modified) — `citation` node correctly wired into the graph (`generate → citation → update_history`)
+- `graph/state.py` (modified) — added `citations: List[dict]` field
+- `api/main.py` (modified) — consistent dict-based handling of `{"answer", "citations"}` across caching and both endpoints
+
+**Result:** answers are now verifiably attributable to real source material, with a genuine (not just assumed) safety net against citation hallucination — directly addressing the "how do I trust this answer" question any real RAG deployment needs to answer, and a good example of catching integration bugs in handed-off work before they reached production behavior.
+
+---
+
 *(This section will be extended after each subsequent step/phase completes.)*

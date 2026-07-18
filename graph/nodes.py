@@ -2,11 +2,17 @@
 Graph nodes: each takes RAGState, returns a partial state update.
 Every LLM call goes through get_llm(task=...) (llm/task_router.py), which
 picks the right lane:
-  - SIMPLE lane (NVIDIA NIM -> local LM Studio): rewrite, route, grade
+  - SIMPLE lane (NVIDIA NIM -> local LM Studio): rewrite, route, grade, hyde
   - COMPLEX lane (Groq -> NVIDIA NIM -> local LM Studio): generate, decompose
 Nodes never know or care which provider actually answered - they only handle
 the case where an entire lane failed (AllProvidersFailedError), degrading
 gracefully instead of crashing.
+
+Plan 2 Step 3: generate_node labels each retrieved chunk [Source N] in the
+context and instructs the model to cite inline. graph/citation_node.py (run
+right after this node) validates those citations against the real retrieved
+chunks and appends the actual References list - generate_node itself does
+NOT build references, to avoid duplicating that responsibility.
 """
 import logging
 from langchain_core.prompts import ChatPromptTemplate
@@ -20,8 +26,8 @@ from llm.errors import AllProvidersFailedError
 
 logger = logging.getLogger("llm_manager")
 
-RETRIEVAL_K = 4  # hybrid retrieval + reranking is precise enough; no longer need k=8 as a band-aid
-MAX_RETRIES = 2  # CRAG: max reformulate-and-retry attempts before giving up
+RETRIEVAL_K = 4
+MAX_RETRIES = 2
 
 ALL_PROVIDERS_DOWN_MESSAGE = "All configured LLM providers are currently unavailable. Please try again shortly."
 
@@ -30,12 +36,15 @@ Synthesize an answer from the relevant parts of the context, even if the informa
 multiple passages or is only partially related. Only say "I don't have enough information to answer that"
 if the context truly contains nothing related to the question.
 
+Each passage below is labeled [Source N]. When you use information from a passage, cite it inline with
+its label, e.g. "AI risks include bias and security concerns [Source 1]." Cite every factual claim.
+
 Context:
 {context}
 
 Question: {question}
 
-Answer:"""
+Answer (with inline [Source N] citations):"""
 
 REWRITE_PROMPT_TEMPLATE = """Given the conversation history and a new question, rewrite the new question
 to be a clear, standalone, specific question optimized for semantic search — resolving any pronouns or
@@ -66,6 +75,15 @@ Question: {question}
 Respond with one yes/no per line, {count} lines total:"""
 
 
+def _build_labeled_context(docs) -> str:
+    """Labels each chunk [Source N] in the context fed to the LLM, so it can cite
+    inline. Does NOT build the References list - that's citation_node's job,
+    using real metadata, so the LLM's citation numbers can be validated against it."""
+    return "\n\n---\n\n".join(
+        f"[Source {i}]\n{doc.page_content}" for i, doc in enumerate(docs, start=1)
+    )
+
+
 def retrieve_node(state: RAGState) -> dict:
     """Retrieves relevant chunks using hybrid (BM25 + vector) search with cross-encoder reranking.
     Uses HyDE (hypothetical document embeddings) for the vector search leg."""
@@ -80,11 +98,9 @@ def check_relevance_node(state: RAGState) -> dict:
 
 
 def generate_node(state: RAGState) -> dict:
-    """Generates an answer from the retrieved chunks. COMPLEX lane: Groq -> NVIDIA -> local."""
-    context = "\n\n---\n\n".join(
-        f"[Source: {doc.metadata.get('source')}]\n{doc.page_content}"
-        for doc in state["retrieved_docs"]
-    )
+    """Generates an answer with inline [Source N] citations. COMPLEX lane."""
+    docs = state["retrieved_docs"]
+    context = _build_labeled_context(docs)
 
     llm = get_llm(task="generate", temperature=0)
     prompt = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
@@ -124,7 +140,6 @@ def rewrite_query_node(state: RAGState) -> dict:
         response = chain.invoke({"history": history_text, "question": state["question"]})
         rewritten = response.content.strip()
     except AllProvidersFailedError:
-        # Fall back to the raw, unrewritten question rather than crashing
         rewritten = state["question"]
 
     return {"rewritten_question": rewritten}
@@ -147,8 +162,7 @@ def router_node(state: RAGState) -> dict:
 
 
 def direct_answer_node(state: RAGState) -> dict:
-    """Handles greetings/meta questions without any retrieval. COMPLEX lane, since
-    it's user-facing conversational output where quality matters most."""
+    """Handles greetings/meta questions without any retrieval. COMPLEX lane."""
     llm = get_llm(task="generate", temperature=0)
     prompt = ChatPromptTemplate.from_template(
         "You are a helpful assistant for a knowledge base covering AI policy, climate change, "
@@ -166,10 +180,7 @@ def direct_answer_node(state: RAGState) -> dict:
 
 
 def decompose_retrieve_node(state: RAGState) -> dict:
-    """Retrieves separately for each sub-question, then combines results.
-    (Pure retrieval - no LLM call here; the synthesis happens afterward in
-    generate_node, which is why 'decompose' is a COMPLEX-lane task name even
-    though this specific function doesn't call an LLM itself.)"""
+    """Retrieves separately for each sub-question, then combines results."""
     all_docs = []
     seen_content = set()
     for sub_q in state["sub_questions"]:
@@ -190,7 +201,7 @@ def route_after_classification(state: RAGState) -> str:
         return "decompose_retrieve"
     elif category == "out_of_scope":
         return "out_of_scope"
-    else:  # "simple"
+    else:
         return "retrieve"
 
 
@@ -215,7 +226,6 @@ def grade_documents_node(state: RAGState) -> dict:
             "count": len(docs),
         })
     except AllProvidersFailedError:
-        # If we can't grade at all, trust retrieval as-is rather than crashing
         return {"retrieved_docs": docs, "grading_passed": True}
 
     verdicts = [line.strip().lower() for line in response.content.strip().split("\n") if line.strip()]
@@ -225,14 +235,13 @@ def grade_documents_node(state: RAGState) -> dict:
         if "yes" in verdict
     ]
 
-    passed = len(graded_docs) >= 1  # even one genuinely relevant chunk is enough to attempt an answer
+    passed = len(graded_docs) >= 1
     return {"retrieved_docs": graded_docs, "grading_passed": passed}
 
 
 def reformulate_query_node(state: RAGState) -> dict:
-    """Rewrites the query differently after a failed grading pass, and increments retry count.
-    SIMPLE lane, same reasoning as rewrite_query_node."""
-    llm = get_llm(task="rewrite", temperature=0.3)  # slight variation so retries don't repeat the same phrasing
+    """Rewrites the query differently after a failed grading pass, and increments retry count."""
+    llm = get_llm(task="rewrite", temperature=0.3)
     prompt = ChatPromptTemplate.from_template(
         "The following search query did not retrieve good results from a knowledge base covering "
         "AI policy, climate change, economics, public health, and AI research. Rewrite it using "
@@ -246,8 +255,6 @@ def reformulate_query_node(state: RAGState) -> dict:
         response = chain.invoke({"question": state["rewritten_question"]})
         new_query = response.content.strip()
     except AllProvidersFailedError:
-        # Can't reformulate right now - keep the same query but still count the
-        # attempt, so we don't loop forever waiting on providers to recover
         new_query = state["rewritten_question"]
 
     return {

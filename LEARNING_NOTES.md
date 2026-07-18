@@ -538,4 +538,24 @@ A subtle but important design decision: HyDE was deliberately applied *only* to 
 
 ---
 
+## Plan 2, Step 3 — Citation & Attribution
+
+### The Big Picture: Trust Requires Verifiability, Not Just Accuracy
+
+A RAG answer being *correct* isn't the same as it being *trustworthy* to a user who can't independently verify it. Citations bridge that gap - they let a user (or a downstream system) check a specific claim against a specific source, rather than trusting the system's overall track record. This is especially important given everything documented earlier in this project - CRAG's honest refusals, the faithfulness-scoring nuances from Step 4's evaluation - all of which show that even a well-built RAG system can produce answers whose exact grounding isn't obvious just from reading the text.
+
+### Concept: Why Citation Validation Matters More Than Citation Generation
+
+It would be easy to stop at "ask the LLM to cite its sources" and consider the feature done - the model does produce `[Source N]` markers, and most of the time they're probably correct. But *most of the time* is exactly the wrong bar for a trust-and-verification feature: a citation system that's right 95% of the time but silently wrong the other 5% is arguably worse than no citations at all, because it creates false confidence. This is why `citation_node` exists as a **separate, independent validation step** rather than trusting the LLM's citations directly - it treats the model's citation markers the same way the rest of this project treats any LLM output: as something to verify against ground truth (the real `retrieved_docs` list), not something to accept at face value. The directly-tested hallucinated-citation case (`[Source 5]` against only 2 real docs) is the proof this isn't just a theoretical safeguard.
+
+### Why the Separate-Node Architecture Was the Right Call
+
+Keeping citation validation in its own node, rather than folding it into `generate_node`, mirrors a pattern already used elsewhere in this project (e.g., `grade_documents_node` being separate from `retrieve_node`) - each node has one clear job, and can be tested, reasoned about, and modified independently. It also meant this specific bug-hunting session could isolate the citation logic and test it directly (as in the final hallucination-stripping test) without needing to run the full graph, generate a real LLM answer, and hope it happened to contain a bad citation to test against - a synthetic, controlled test was possible specifically because the responsibility was cleanly separated.
+
+### The Handoff Bugs as a Case Study in Reviewing Other Work Critically
+
+This step is a useful reminder that code arriving from *any* source - including another capable AI session working on the same project with full context - still needs the same verification discipline as code written from scratch. All three bugs found here (missing function definition, unwired graph edge, type mismatch) are the kind of thing that's easy to miss on a read-through, because the code *looks* complete and well-reasoned (the citation_node.py file itself, for instance, was genuinely well-designed) - the problems were specifically in the *integration points* between files, which are exactly the seams that a per-file review can miss. This reinforces a theme that's shown up repeatedly in this project: the actual test of whether code works is running it, not reading it and judging it plausible.
+
+---
+
 *(This file will be extended with a new section after each subsequent phase/step completes.)*

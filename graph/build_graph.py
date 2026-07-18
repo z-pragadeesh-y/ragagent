@@ -1,10 +1,11 @@
 """
 Builds the LangGraph state machine with agentic routing + corrective retrieval (CRAG):
-rewrite -> route -> [direct_answer | retrieve -> check_relevance -> grade_documents -> (generate | reformulate_query -> retrieve loop | out_of_scope) | decompose_retrieve -> generate] -> update_history
+rewrite -> route -> [direct_answer | retrieve -> check_relevance -> grade_documents -> (generate -> citation | reformulate_query -> retrieve loop | out_of_scope) | decompose_retrieve -> generate -> citation] -> update_history
 """
 import sqlite3
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
+from graph.citation_node import citation_node
 from graph.state import RAGState
 from graph.nodes import (
     retrieve_node,
@@ -36,6 +37,7 @@ def build_graph():
     workflow.add_node("grade_documents", grade_documents_node)
     workflow.add_node("reformulate_query", reformulate_query_node)
     workflow.add_node("generate", generate_node)
+    workflow.add_node("citation", citation_node)
     workflow.add_node("out_of_scope", out_of_scope_node)
     workflow.add_node("update_history", update_history_node)
 
@@ -71,8 +73,13 @@ def build_graph():
     # since sub-questions were already router-approved as in-scope topics
     workflow.add_edge("decompose_retrieve", "generate")
 
+    # generate always passes through citation validation/formatting before history update
+    workflow.add_edge("generate", "citation")
+    workflow.add_edge("citation", "update_history")
+
+    # direct_answer and out_of_scope have no retrieved_docs to cite, so they
+    # skip the citation node entirely and go straight to update_history
     workflow.add_edge("direct_answer", "update_history")
-    workflow.add_edge("generate", "update_history")
     workflow.add_edge("out_of_scope", "update_history")
     workflow.add_edge("update_history", END)
 
@@ -113,5 +120,6 @@ if __name__ == "__main__":
             print(f"Sub-questions: {result['sub_questions']}")
         print(f"Retry count: {result['retry_count']}")
         print(f"Sources: {[d.metadata.get('source') for d in result['retrieved_docs']]}")
-        print(f"Answer: {result['answer'][:250]}\n")
+        print(f"Citations: {result.get('citations', [])}")
+        print(f"Answer: {result['answer'][:400]}\n")
         print("-" * 60)
