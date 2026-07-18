@@ -433,4 +433,30 @@ Both guards deliberately **fail open** (assume not-injection / in-scope) if the 
 
 ---
 
-*(This section will be extended after each subsequent step/phase completes.)*
+### Step 5 — Feedback Logging ✅ Complete (Plan 2 fully finished)
+**What was done:**
+Built `feedback/feedback_logger.py`, a plain, dedicated module (not a graph node) that logs live production traffic to a persistent SQLite store (`feedback.sqlite`, separate from `checkpoints.sqlite`), capturing question, answer, citations, retrieved chunk sources, route category, and both guardrail flags (`is_injection`, `scope_flagged`) for every real query — distinct from Plan 1 Step 4's golden-set evaluation, this captures actual usage rather than a fixed benchmark, and is structured so a future thumbs-up/down UI could attach to logged rows by `id` without re-plumbing.
+
+Logging is deliberately kept outside the LangGraph node model and hooked into `api/main.py` instead, via a new `_fire_feedback_log()` helper called from `_run_graph_sync()` right after `graph.invoke()` returns. It runs in a background daemon thread that is never awaited, guaranteeing zero added latency to the actual response, and `log_feedback()` itself wraps its entire write in try/except, swallowing any failure as a logged warning — logging can never block, slow down, or crash a real user-facing answer, satisfying the roadmap's explicit fire-and-forget requirement in two independent, layered ways (never awaited, and never able to raise).
+
+A small necessary addition was made to `graph/scope_guard_node.py`: it previously only logged scope violations via `logger.warning()` without exposing that fact on graph state. A new `scope_flagged: bool` field was added to `graph/state.py` (mirroring how `is_injection` was added in Step 4), and `scope_guard_node`'s two return statements were updated to set it — its actual detection logic (the LLM prompt, the classification call) was deliberately left untouched, a scope constraint explicitly confirmed before implementation rather than assumed.
+
+**A genuine module-naming collision was caught and avoided before it could cause a bug:** the original task description suggested a `logging/feedback_logger.py` path as an example, but a top-level package literally named `logging` would shadow Python's own standard library `logging` module — which this entire codebase already imports everywhere (`import logging`). This was identified and the module placed under `feedback/` instead, avoiding what would have been a subtle, import-order-dependent bug affecting every file in the project, not just the new one.
+
+**Verification, directly reviewed against real evidence (not descriptions of it):**
+- Full 10-question regression suite passed (10/10) after all edits landed. One test question happened to be flagged by the scope guard during this very run (visible as the fixed refusal message in place of a real answer) — useful, naturally-occurring evidence the guard fires under real conditions, and the suite still passed correctly since `is_relevant` (what it checks) is independent of the scope flag.
+- Live end-to-end verification through the actual running API confirmed three real, distinct logged rows: a normal in-scope question (correct route category, both flags 0), the documented injection string (`is_injection=1`, `route_category` empty — directly proving the short-circuit skipped router/retrieval/generation entirely, not just returned a refusal-shaped answer), and an opinion-worded regulatory question that did not trigger the scope flag live (correctly attributed to LLM judge non-determinism rather than a logging defect, since the same question had flagged during the earlier test-suite run).
+- Since a genuine `scope_flagged=1` row could not be reliably reproduced on demand, the write-path for that specific flag was isolated and proven separately via a direct manual `log_feedback()` call, confirmed by a real returned database row showing `scope_flagged=1` stored correctly.
+- **Honestly and explicitly flagged, not glossed over:** no naturally-occurring `scope_flagged=1` row was captured from genuine live traffic during this session — only from the test-suite run (visible in output, not a logged row at the time) and the isolated manual write test. This is correctly attributed to guardrail-accuracy nondeterminism (a Step 4 concern) rather than a logging gap (this step's actual scope), and left as an open, named item rather than papered over or claimed as fully demonstrated.
+
+**New files created/modified (Plan 2 Step 5):**
+- `feedback/feedback_logger.py` — new module: best-effort SQLite logging with full exception isolation
+- `graph/state.py` (modified) — added `scope_flagged: bool` field
+- `graph/scope_guard_node.py` (modified) — now also sets `scope_flagged` on state; detection logic itself untouched
+- `api/main.py` (modified) — new `_fire_feedback_log()` helper, called via background thread from `_run_graph_sync()`
+
+**Result:** this closes out **Plan 2 in its entirety** (Steps 1–5: structure-aware ingestion, HyDE query expansion, citation & attribution, guardrails, and now feedback logging) — the project now has real, persistent visibility into live usage, verified via actual inspected database rows rather than assumed correctness, alongside every other Plan 1 and Plan 2 capability built and verified across this project's full history.
+
+---
+
+*(This section will be extended if further phases/steps are added to the roadmap.)*

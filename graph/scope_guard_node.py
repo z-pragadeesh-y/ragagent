@@ -14,6 +14,11 @@ If flagged, the answer (and any citations built from it) is discarded and
 replaced with a fixed scope-refusal message, rather than silently letting
 scope-violating content reach the user with a References list attached that
 would misleadingly imply the drifted content was itself source-grounded.
+
+Plan 2 Step 5 update: also sets scope_flagged on state (mirroring
+is_injection's pattern) so feedback logging can capture whether this
+guardrail fired, without needing to parse log text — detection logic itself
+is unchanged from Step 4.
 """
 import logging
 from langchain_core.prompts import ChatPromptTemplate
@@ -66,14 +71,15 @@ def _llm_flags_scope_violation(question: str, answer: str) -> bool:
 
 def scope_guard_node(state: RAGState) -> dict:
     """Checks the final answer for scope drift. If flagged, discards the
-    answer and its citations, replacing both with a fixed refusal — otherwise
-    passes the answer through unchanged."""
+    answer and its citations, replacing both with a fixed refusal and setting
+    scope_flagged=True — otherwise passes the answer through unchanged with
+    scope_flagged=False."""
     answer = state.get("answer", "")
     if not answer:
-        return {}
+        return {"scope_flagged": False}
 
     if _llm_flags_scope_violation(state["question"], answer):
         logger.warning("scope_guard_node: answer flagged as out-of-scope, discarding answer + citations")
-        return {"answer": SCOPE_VIOLATION_MESSAGE, "citations": []}
+        return {"answer": SCOPE_VIOLATION_MESSAGE, "citations": [], "scope_flagged": True}
 
-    return {}
+    return {"scope_flagged": False}

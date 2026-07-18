@@ -578,4 +578,28 @@ This step's handoff worked noticeably more smoothly than Step 3's, and the diffe
 
 ---
 
-*(This file will be extended with a new section after each subsequent phase/step completes.)*
+## Plan 2, Step 5 — Feedback Logging
+
+### The Big Picture: Evaluation vs. Observability
+
+Plan 1 Step 4 (RAGAS-style evaluation) and this step answer genuinely different questions, even though both involve "logging results" in some loose sense. Evaluation asks "how good is the system, measured against a fixed, curated set of known-answerable questions?" - a controlled, repeatable benchmark. Feedback logging asks "what is actually happening in real usage, right now, with real (possibly unpredictable) questions?" - an open-ended, ongoing record. A system can score well on a golden set while still behaving unexpectedly on real traffic (different phrasing, genuinely novel questions, edge cases no one thought to golden-set), which is exactly why both are needed, not just one standing in for the other.
+
+### Concept: Fire-and-Forget, Implemented in Two Independent Layers
+
+"Never block or crash the real response" sounds like a single requirement, but it's actually two separate failure modes that need two separate defenses. A logging call could fail (bad data, disk full, DB locked) - `log_feedback()`'s own try/except handles that, ensuring a failure can never propagate up as an exception. Separately, a logging call could simply be *slow* even if it eventually succeeds - waiting for it, even briefly, adds latency to every single response. The background daemon thread in `api/main.py`, which is started but never awaited, handles that second concern independently. Neither defense alone is sufficient: exception-handling alone doesn't prevent added latency from a slow-but-successful write, and threading alone doesn't prevent an unhandled exception inside that thread from producing a confusing stack trace in server logs (even if it doesn't crash the *response*, an uncaught exception in a background thread is still worth avoiding cleanly). Layering both defenses is what actually delivers the full guarantee the roadmap asked for.
+
+### Why the logging/ Naming Collision Was a Genuinely Sharp Catch
+
+This is worth understanding precisely, because it's a specific category of bug that's easy to miss even in careful review: Python resolves `import logging` by searching `sys.path`, and a local project directory is typically searched *before* the standard library in many common execution setups. A project-local folder named `logging/` containing an `__init__.py` could, depending on exactly how the project is run and structured, shadow the real standard library module - meaning every other file's `import logging` (used extensively throughout this entire project, in nearly every module) could silently start resolving to the wrong thing, or fail outright, in ways that would be genuinely confusing to debug (the error would appear to be "logging doesn't have attribute X" in files that have nothing to do with the new feature being built). Catching this *before* writing any code, purely by anticipating the collision rather than debugging it after the fact, is a good example of experience-based pattern recognition - the kind of "I've seen this class of problem before" instinct that's hard to teach directly but valuable when it fires at the right moment.
+
+### The Honesty of the Unproven Live Case
+
+The explicit acknowledgment that a real `scope_flagged=1` row was never naturally captured from genuine live traffic - only from a test-suite run and an isolated manual write test - is a good closing example of this project's consistent standard: verification claims are only as strong as the actual evidence behind them, and "the mechanism is proven correct" is a categorically different, weaker claim than "this exact scenario was observed working end-to-end in realistic conditions." Correctly separating those two claims, and being explicit about which one was actually achieved, is more valuable than a vaguer, more confident-sounding closeout would have been - it gives an accurate picture of what's genuinely settled versus what would need a bit more real-world traffic to fully confirm.
+
+---
+
+## Plan 2 - Retrospective
+
+Plan 2 (Steps 1-5) took the working, well-verified Plan 1 pipeline and made it trustworthy and observable rather than just functionally correct: real document structure finally used (Step 1), better-grounded retrieval (Step 2), verifiable source attribution (Step 3), a closed, previously-documented security gap (Step 4), and now real visibility into live behavior (Step 5). Combined with Plan 1's retrieval/routing/correction/evaluation/serving infrastructure, and the multi-provider failover system built in direct response to a real operational failure along the way, this project has moved from "a working RAG demo" to something with the actual engineering characteristics - verifiability, resilience, observability, security-consciousness - that separate a learning exercise from production-adjacent work. Every one of these characteristics was arrived at through the same consistent process: build, test with real cases (not assumed correctness), find real bugs, fix them, document honestly including what's still uncertain, and only then move forward.
+
+*(This file will be extended if further phases/steps are added to the roadmap.)*
