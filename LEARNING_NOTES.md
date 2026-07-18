@@ -558,4 +558,24 @@ This step is a useful reminder that code arriving from *any* source - including 
 
 ---
 
+## Plan 2, Step 4 — Guardrails
+
+### The Big Picture: Closing a Loop Opened Three Steps Ago
+
+This step is unusually satisfying to document because it directly resolves something explicitly left open, on the record, all the way back in Plan 1 Step 2 - the injection vulnerability wasn't forgotten or rediscovered by accident; it was deliberately deferred with a clear rationale at the time ("prompt-injection defense is Plan 2 Step 9's job, not something to patch piecemeal now"), and this step is that promise being kept. This is a good demonstration of why documenting known limitations honestly, with a clear reason for *why* they're deferred rather than fixed immediately, matters - it turns a loose end into a tracked, plannable piece of future work instead of something that just quietly stays broken.
+
+### Concept: Fail Open vs. Fail Closed, Applied Deliberately in Both Directions
+
+This project has now used both failure philosophies, each in the context where it's actually correct - not as a blanket rule. Plan 2 Step 3's router rate-limit fallback deliberately **fails closed** (defaults to `out_of_scope` if a provider is unreachable), because letting an unverifiable question through as if it were answerable risks a worse outcome (fabricated-seeming answers) than briefly refusing a legitimate question. These two guardrail nodes deliberately **fail open** (assume not-injection / in-scope) under the same kind of provider outage, because the cost asymmetry runs the other way here: failing closed would mean the *entire assistant* stops answering *every* question during a temporary outage, whereas failing open at worst lets one normal question proceed through the existing pipeline as usual - a much smaller, more contained risk. Recognizing that "which way to fail" isn't a single fixed rule, but a case-by-case judgment about which failure mode is actually less costly, is a mature piece of system design - and this project has now made that judgment correctly in both directions, in different components, at different times.
+
+### Why the Scope Guard Discards Citations Along With the Answer
+
+A subtler design decision worth noting: when `scope_guard_node` flags an answer, it doesn't just replace the answer text - it explicitly wipes the citations list too. It would be easy to only touch the answer and leave the (now-orphaned) citations from the discarded generation attempt still attached. But citations exist specifically to make a claim verifiable against real source material - leaving them attached to a *different*, replacement refusal message would misrepresent what those citations actually support, effectively creating a new, smaller version of exactly the citation-hallucination problem Step 3 was built to prevent. Catching this kind of second-order consequence (not just "what does this node need to do" but "what stale state might be left behind that could mislead a later reader") is the kind of detail that separates a technically-functional guardrail from a genuinely trustworthy one.
+
+### The Value of a Well-Scoped, Explicit Handoff Prompt
+
+This step's handoff worked noticeably more smoothly than Step 3's, and the difference is instructive: the prompt for this step explicitly named the exact prior failure mode ("a node created and imported but never wired into the graph - this exact mistake happened in Step 3") as something to specifically guard against, rather than leaving the receiving session to rediscover that risk on its own. This is a direct, practical application of documenting failures for future benefit - not an abstract principle, but a concrete case where citing a specific past mistake, by name, in the instructions for new work, measurably improved the quality of that new work's self-verification (the build_graph.py wiring was explicitly double-checked because it was flagged as a known risk, not caught by luck).
+
+---
+
 *(This file will be extended with a new section after each subsequent phase/step completes.)*

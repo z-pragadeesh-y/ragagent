@@ -17,3 +17,4 @@ class RAGState(TypedDict):
     retry_count: int
     grading_passed: bool
     citations: List[dict]
+    is_injection: bool
