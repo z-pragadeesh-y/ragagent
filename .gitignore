@@ -8,3 +8,6 @@ checkpoints.sqlite-*
 checkpoints.sqlite
 
 feedback.sqlite*
+
+requirements_current.txt
+requirements_full_backup.txt
