@@ -1,0 +1,28 @@
+# --- Local Python environment (Windows binaries, wrong OS for the container) ---
+venv/
+venv_test/
+__pycache__/
+*.pyc
+
+# --- Git metadata (not needed to run the app) ---
+.git/
+.gitignore
+
+# --- Local secrets (passed in at runtime instead, never baked into the image) ---
+.env
+
+# --- Runtime databases (should be created fresh inside the container, not copied stale) ---
+checkpoints.sqlite
+feedback.sqlite
+
+# --- Docs / non-runtime files (don't need to be in the deployed image) ---
+README.md
+DEVLOG.md
+LEARNING_NOTES.md
+RAG_Project_Roadmap_v2_updated.docx
+LICENSE
+
+# --- IDE/OS clutter ---
+.vscode/
+.idea/
+Thumbs.db
