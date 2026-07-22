@@ -13,12 +13,22 @@ context and instructs the model to cite inline. graph/citation_node.py (run
 right after this node) validates those citations against the real retrieved
 chunks and appends the actual References list - generate_node itself does
 NOT build references, to avoid duplicating that responsibility.
+
+Plan 3: retrieve_node now also merges in session-scoped uploaded-document
+chunks for this thread_id (ingestion/session_store.py), if any exist.
+Uploaded chunks are tagged domain_tag="uploaded" and are completely
+isolated from the permanent KB - they only ever surface for the thread_id
+that uploaded them. route_after_classification also gets a bypass: if the
+router says out_of_scope but this thread has an uploaded doc, we still
+attempt retrieval, since the router only knows the fixed 5-domain KB and
+has no visibility into session uploads.
 """
 import logging
 from langchain_core.prompts import ChatPromptTemplate
 
 from ingestion.vectorstore import load_vectorstore
 from ingestion.hybrid_retriever import hybrid_retrieve
+from ingestion.session_store import has_session_doc, session_retrieve
 from graph.state import RAGState
 from graph.router import route_query
 from llm.task_router import get_llm
@@ -85,9 +95,18 @@ def _build_labeled_context(docs) -> str:
 
 
 def retrieve_node(state: RAGState) -> dict:
-    """Retrieves relevant chunks using hybrid (BM25 + vector) search with cross-encoder reranking.
-    Uses HyDE (hypothetical document embeddings) for the vector search leg."""
+    """Retrieves relevant chunks using hybrid (BM25 + vector) search with cross-encoder
+    reranking. Uses HyDE for the vector search leg. Plan 3: if this thread_id has a
+    session-scoped uploaded document, its chunks are retrieved separately and placed
+    FIRST (uploaded docs are usually what the user is directly asking about), then
+    merged with the permanent-KB results."""
     docs = hybrid_retrieve(state["rewritten_question"], fusion_k=15, final_k=RETRIEVAL_K, use_hyde=True)
+
+    thread_id = state.get("thread_id", "")
+    if thread_id and has_session_doc(thread_id):
+        session_docs = session_retrieve(thread_id, state["rewritten_question"], k=RETRIEVAL_K)
+        docs = session_docs + docs
+
     return {"retrieved_docs": docs}
 
 
@@ -193,13 +212,19 @@ def decompose_retrieve_node(state: RAGState) -> dict:
 
 
 def route_after_classification(state: RAGState) -> str:
-    """Conditional edge: decides graph path based on router category."""
+    """Conditional edge: decides graph path based on router category.
+    Plan 3: if the router says out_of_scope but this thread has an uploaded
+    document, we still attempt retrieval - the router only knows the fixed
+    5-domain KB, so out_of_scope here means "not one of the 5 domains", not
+    "definitely unanswerable"."""
     category = state["route_category"]
     if category == "direct":
         return "direct_answer"
     elif category == "decompose":
         return "decompose_retrieve"
     elif category == "out_of_scope":
+        if state.get("has_uploaded_doc"):
+            return "retrieve"
         return "out_of_scope"
     else:
         return "retrieve"
