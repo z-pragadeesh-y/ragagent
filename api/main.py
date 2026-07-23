@@ -45,6 +45,7 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -90,7 +91,7 @@ MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB - generous for text/policy-doc-size
 
 class ChatRequest(BaseModel):
     question: str
-    thread_id: str = None
+    thread_id: Optional[str] = None
 
 
 def _build_initial_state(question: str, thread_id: str, is_new_thread: bool) -> dict:
