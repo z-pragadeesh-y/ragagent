@@ -74,8 +74,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        # TODO: add the real Vercel production URL here once deployed,
-        # e.g. "https://ragagent-frontend.vercel.app"
+        "https://ragagent-frontend.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
