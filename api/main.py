@@ -47,6 +47,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
@@ -61,6 +62,25 @@ from ingestion.session_store import (
 )
 
 app = FastAPI(title="RAGAgent API")
+
+# CORS: the frontend runs on a different origin than this API (localhost:5173
+# during development, a Vercel domain once deployed), so the browser blocks
+# fetch() calls unless this API explicitly allows it. allow_origins is kept
+# as an explicit list rather than "*" so credentials/cookies could be added
+# later without hitting the browser's "wildcard + credentials" restriction.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        # TODO: add the real Vercel production URL here once deployed,
+        # e.g. "https://ragagent-frontend.vercel.app"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 graph = build_graph()
 cache = get_cache()
 
