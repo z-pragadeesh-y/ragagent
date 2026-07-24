@@ -7,6 +7,15 @@ boundaries, domain_tag/section_title metadata) instead of the old blind
 fixed-size chunks. An optional domain_tag filter is supported for when the
 router is later extended to also classify domain, not just category - not
 wired into the graph yet, but the retrieval layer is ready for it.
+
+Priority 1 update: hybrid_retrieve() now accepts optional session_vectorstore/
+session_bm25/session_chunks. When provided (a thread has an uploaded doc),
+those candidates are pulled into the SAME vector-search results list, the
+SAME BM25 candidate pool, and go through the SAME RRF fusion + cross-encoder
+rerank as the permanent corpus - one unified ranking. This function has no
+awareness of "uploaded vs. permanent" beyond where the candidates came from;
+it just ranks. retrieve_node/decompose_retrieve_node (graph/nodes.py) are the
+only callers that know a thread_id has a session doc at all.
 """
 import re
 import torch
@@ -58,12 +67,27 @@ def reciprocal_rank_fusion(vector_ranked_ids, bm25_ranked_ids, k=60):
     return scores
 
 
-def hybrid_retrieve(query: str, fusion_k: int = 15, final_k: int = 4, domain_tag: str = None, use_hyde: bool = False):
+def hybrid_retrieve(
+    query: str,
+    fusion_k: int = 15,
+    final_k: int = 4,
+    domain_tag: str = None,
+    use_hyde: bool = False,
+    session_vectorstore=None,
+    session_bm25=None,
+    session_chunks=None,
+):
     """
     Full pipeline: vector search + BM25 search -> RRF fusion -> cross-encoder rerank -> top final_k.
     If domain_tag is provided, both vector search and the BM25 candidate pool are restricted
     to chunks tagged with that domain, eliminating cross-domain noise entirely for queries
     where the domain is already known (e.g. from router classification).
+
+    session_vectorstore/session_bm25/session_chunks: optional, supplied by the
+    caller when the current thread has an uploaded document (ingestion/session_store.py).
+    When present, session candidates are added into the SAME vector-results list
+    and the SAME BM25 candidate pool before fusion/reranking - there is no
+    separate ranking step for them, and no special-casing beyond this point.
     """
     vectorstore = load_structured_vectorstore()
     bm25_index, bm25_chunks = _get_bm25_index()
@@ -76,14 +100,21 @@ def hybrid_retrieve(query: str, fusion_k: int = 15, final_k: int = 4, domain_tag
         from ingestion.hyde import generate_hyde_passage
         vector_search_query = generate_hyde_passage(query)
 
-    # 1. Vector search (semantic) - get more candidates than we need
+    # 1. Vector search (semantic) - permanent corpus, get more candidates than needed
     vector_kwargs = {"k": fusion_k}
     if domain_tag:
         vector_kwargs["filter"] = {"domain_tag": domain_tag}
     vector_results = vectorstore.similarity_search(vector_search_query, **vector_kwargs)
+
+    # Session vector candidates (uploaded doc, if any) - same query, same k,
+    # added directly into vector_results so they compete in the same fusion pool.
+    if session_vectorstore is not None:
+        session_vector_results = session_vectorstore.similarity_search(vector_search_query, k=fusion_k)
+        vector_results = session_vector_results + vector_results
+
     vector_ids = [doc.page_content for doc in vector_results]
 
-    # 2. BM25 search (keyword) - restrict candidate pool to the domain if given
+    # 2. BM25 search (keyword) - permanent corpus, restrict candidate pool to the domain if given
     tokenized_query = _tokenize(query)
     bm25_scores = bm25_index.get_scores(tokenized_query)
 
@@ -95,13 +126,24 @@ def hybrid_retrieve(query: str, fusion_k: int = 15, final_k: int = 4, domain_tag
     bm25_ranked_indices = sorted(eligible_indices, key=lambda i: bm25_scores[i], reverse=True)[:fusion_k]
     bm25_ids = [bm25_chunks[i].page_content for i in bm25_ranked_indices]
 
-    # 3. Fuse rankings via RRF
-    fused_scores = reciprocal_rank_fusion(vector_ids, bm25_ids)
-
     content_to_doc = {doc.page_content: doc for doc in vector_results}
     for i in bm25_ranked_indices:
         chunk = bm25_chunks[i]
         content_to_doc.setdefault(chunk.page_content, chunk)
+
+    # Session BM25 candidates (uploaded doc, if any) - same tokenizer, ranked
+    # against the same query, folded into the same bm25_ids list pre-fusion.
+    if session_bm25 is not None and session_chunks:
+        session_scores = session_bm25.get_scores(tokenized_query)
+        session_ranked_indices = sorted(range(len(session_chunks)), key=lambda i: session_scores[i], reverse=True)[:fusion_k]
+        session_bm25_ids = [session_chunks[i].page_content for i in session_ranked_indices]
+        bm25_ids = session_bm25_ids + bm25_ids
+        for i in session_ranked_indices:
+            chunk = session_chunks[i]
+            content_to_doc.setdefault(chunk.page_content, chunk)
+
+    # 3. Fuse rankings via RRF - one fusion over the combined pool, no separate step for session data
+    fused_scores = reciprocal_rank_fusion(vector_ids, bm25_ids)
 
     fused_candidates = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
     candidate_docs = [content_to_doc[content] for content, _ in fused_candidates if content in content_to_doc]

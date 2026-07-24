@@ -1,34 +1,48 @@
 """
-Plan 3: Session-scoped document store for user-uploaded files.
+Priority 1 (Dynamic Document Ingestion) - rewritten.
 
-Uploaded docs are NEVER merged into the permanent knowledge base
-(ingestion/vectorstore.py's ragagent_structured collection) - each upload
-gets its own isolated Chroma collection keyed by thread_id, so one user's
-upload can never leak into another user's retrieval or pollute the
-permanent 5-domain KB. Reuses the same embedding model (ingestion/embedder.py)
-as the main pipeline for consistency.
+Upload-specific logic ends at "produce a structured markdown Document."
+From that point on, this module calls the EXACT SAME
+structured_chunker.chunk_documents_structured() used for the 5 permanent
+documents - no parallel chunking logic.
 
-Supports .pdf, .txt, and .md uploads. PDF extraction uses pypdf.
+Pipeline:
+  PDF/txt/md -> pdf_preprocessor.extract_and_clean()          [upload-only]
+             -> markdown_generator.generate_structured_markdown()  [upload-only]
+             -> metadata_enricher.enrich_and_persist()         [upload-only, persists to disk]
+             -> structured_chunker.chunk_documents_structured()    [SHARED - same function, same code path as permanent corpus]
+             -> per-thread Chroma collection (same schema/embedder as permanent KB)
+             -> per-thread BM25 index (previously missing entirely - now uploads
+                participate in keyword search too, not just vector search)
 
-One uploaded doc per thread_id at a time - uploading again to the same
-thread_id replaces the previous one, rather than silently accumulating,
-to keep retrieval-merging in graph/nodes.py simple and predictable.
+Session isolation preserved: each thread_id gets its own Chroma collection
+AND its own BM25 index, never touching the permanent ragagent_structured
+collection or the permanent BM25 index in hybrid_retriever.py. What's
+shared is the CODE PATH (structured_chunker, embedder, Chroma class,
+BM25Okapi), not the data.
+
+One uploaded doc per thread_id at a time - uploading again replaces the
+previous one (same policy as before).
 """
+import re
 import shutil
 from pathlib import Path
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from rank_bm25 import BM25Okapi
 
 from ingestion.embedder import get_embedding_model
+from ingestion.structured_chunker import chunk_documents_structured
+from ingestion import pdf_preprocessor
+from ingestion import markdown_generator
+from ingestion import metadata_enricher
 
 SESSION_PERSIST_ROOT = Path(__file__).resolve().parent.parent / ".chroma_sessions"
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
 
-# Cached vectorstore handles per thread_id, so repeated retrievals in the
-# same conversation don't reopen the Chroma collection from disk every turn.
+# Cached per-thread handles so repeated turns in the same conversation don't
+# reopen Chroma from disk or rebuild BM25 every retrieval call.
 _session_vectorstore_cache: dict = {}
+_session_bm25_cache: dict = {}  # thread_id -> (BM25Okapi, list[Document])
 
 
 def _collection_name(thread_id: str) -> str:
@@ -39,50 +53,39 @@ def _persist_dir(thread_id: str) -> str:
     return str(SESSION_PERSIST_ROOT / thread_id)
 
 
-def _extract_text(file_path: Path) -> str:
-    """Extracts raw text from an uploaded file based on its extension."""
-    suffix = file_path.suffix.lower()
-
-    if suffix in (".txt", ".md"):
-        return file_path.read_text(encoding="utf-8")
-
-    if suffix == ".pdf":
-        from pypdf import PdfReader
-        reader = PdfReader(str(file_path))
-        return "\n\n".join(page.extract_text() or "" for page in reader.pages)
-
-    raise ValueError(f"Unsupported file type: {suffix}. Supported: .pdf, .txt, .md")
+def _tokenize(text: str) -> list[str]:
+    """Same tokenizer as hybrid_retriever.py, kept identical so fused BM25
+    scores are computed consistently regardless of which index they came from."""
+    return re.findall(r"\b\w+\b", text.lower())
 
 
 def build_session_vectorstore(thread_id: str, file_path: Path, original_filename: str) -> int:
     """
-    Extracts, chunks, and embeds an uploaded document into a Chroma collection
-    scoped ONLY to this thread_id. Returns the number of chunks stored.
-    Replaces any prior upload for this thread_id first.
+    Full Priority-1 ingestion pipeline for one uploaded file. Returns the
+    number of chunks stored. Replaces any prior upload for this thread_id.
     """
-    text = _extract_text(file_path)
-    if not text.strip():
+    # Stage 1+2: Extract + Clean (upload-only)
+    cleaned_text = pdf_preprocessor.extract_and_clean(file_path)
+    if not cleaned_text.strip():
         raise ValueError(f"No extractable text found in '{original_filename}'")
 
-    doc = Document(
-        page_content=text,
-        metadata={
-            "source": original_filename,
-            "domain_tag": "uploaded",
-            "document_title": original_filename,
-            "section_title": "",
-        },
-    )
+    # Stage 3: Markdown Generator (upload-only) - structure, never rewrite content
+    structured_body = markdown_generator.generate_structured_markdown(cleaned_text)
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, length_function=len,
-    )
-    chunks = splitter.split_documents([doc])
-    for i, chunk in enumerate(chunks):
-        chunk.metadata["chunk_id"] = i
+    # Stage 4: Metadata Generation/Enrichment + Persist (upload-only)
+    markdown_path = metadata_enricher.enrich_and_persist(structured_body, original_filename, thread_id)
+
+    # From here on: IDENTICAL code path to the permanent corpus.
+    full_markdown = markdown_path.read_text(encoding="utf-8")
+    doc = Document(page_content=full_markdown, metadata={"source": original_filename})
+    chunks = chunk_documents_structured([doc])  # SAME function used for the 5 permanent docs
+
+    if not chunks:
+        raise ValueError(f"Structuring/chunking produced no chunks for '{original_filename}'")
 
     delete_session_vectorstore(thread_id)  # replace, don't accumulate
 
+    # Same embedder, same Chroma class as the permanent KB - separate collection only.
     embedder = get_embedding_model()
     vectorstore = Chroma.from_documents(
         documents=chunks,
@@ -91,6 +94,11 @@ def build_session_vectorstore(thread_id: str, file_path: Path, original_filename
         persist_directory=_persist_dir(thread_id),
     )
     _session_vectorstore_cache[thread_id] = vectorstore
+
+    # Per-thread BM25 index - same BM25Okapi/tokenizer as the permanent index,
+    # just scoped to this thread's chunks instead of the whole corpus.
+    tokenized = [_tokenize(c.page_content) for c in chunks]
+    _session_bm25_cache[thread_id] = (BM25Okapi(tokenized), chunks)
 
     return len(chunks)
 
@@ -104,8 +112,8 @@ def has_session_doc(thread_id: str) -> bool:
     return Path(_persist_dir(thread_id)).exists()
 
 
-def load_session_vectorstore(thread_id: str):
-    """Returns the Chroma vectorstore for this thread's uploaded doc, or None if none exists."""
+def get_session_vectorstore(thread_id: str):
+    """Returns the Chroma vectorstore for this thread's uploaded doc, or None."""
     if not has_session_doc(thread_id):
         return None
     if thread_id not in _session_vectorstore_cache:
@@ -118,21 +126,46 @@ def load_session_vectorstore(thread_id: str):
     return _session_vectorstore_cache[thread_id]
 
 
-def session_retrieve(thread_id: str, query: str, k: int = 4) -> list[Document]:
-    """Similarity search against this thread's uploaded doc only. Returns [] if none exists."""
-    vectorstore = load_session_vectorstore(thread_id)
-    if vectorstore is None:
-        return []
-    return vectorstore.similarity_search(query, k=k)
+def get_session_bm25(thread_id: str):
+    """
+    Returns (BM25Okapi, chunks) for this thread's uploaded doc, or (None, [])
+    if none exists or it hasn't been rebuilt this process (e.g. after a
+    restart with persisted Chroma but no in-memory BM25 cache - BM25 isn't
+    persisted to disk since it's cheap to rebuild from the vectorstore's
+    stored chunks). Used by hybrid_retriever.py to fold session chunks into
+    the SAME fusion+rerank pipeline as the permanent corpus - never a
+    separate retrieval path.
+    """
+    if not has_session_doc(thread_id):
+        return None, []
+    if thread_id in _session_bm25_cache:
+        return _session_bm25_cache[thread_id]
+
+    # Process restarted / cache cold: rebuild BM25 from the persisted Chroma collection's chunks.
+    vectorstore = get_session_vectorstore(thread_id)
+    stored = vectorstore.get()  # {"documents": [...], "metadatas": [...]}
+    chunks = [
+        Document(page_content=text, metadata=meta)
+        for text, meta in zip(stored["documents"], stored["metadatas"])
+    ]
+    if not chunks:
+        return None, []
+    tokenized = [_tokenize(c.page_content) for c in chunks]
+    bm25 = BM25Okapi(tokenized)
+    _session_bm25_cache[thread_id] = (bm25, chunks)
+    return bm25, chunks
 
 
 def delete_session_vectorstore(thread_id: str) -> None:
-    """Deletes a thread's uploaded doc + its Chroma collection from disk. Safe to call even
-    if nothing exists for this thread_id. Call this when a session/thread ends (or via the
-    DELETE /upload/{thread_id} endpoint) so uploads don't accumulate indefinitely on disk -
-    note Railway's filesystem is ephemeral anyway and wipes on every redeploy, but this
-    matters for long-running deployments between redeploys."""
+    """Deletes a thread's uploaded doc, its Chroma collection, its BM25 cache,
+    and its persisted markdown file from disk. Safe to call even if nothing
+    exists for this thread_id."""
     _session_vectorstore_cache.pop(thread_id, None)
+    _session_bm25_cache.pop(thread_id, None)
+
     persist_path = Path(_persist_dir(thread_id))
     if persist_path.exists():
         shutil.rmtree(persist_path, ignore_errors=True)
+
+    markdown_path = metadata_enricher.UPLOADED_MARKDOWN_DIR / f"{thread_id}.md"
+    markdown_path.unlink(missing_ok=True)

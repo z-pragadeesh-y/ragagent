@@ -14,21 +14,20 @@ right after this node) validates those citations against the real retrieved
 chunks and appends the actual References list - generate_node itself does
 NOT build references, to avoid duplicating that responsibility.
 
-Plan 3: retrieve_node now also merges in session-scoped uploaded-document
-chunks for this thread_id (ingestion/session_store.py), if any exist.
-Uploaded chunks are tagged domain_tag="uploaded" and are completely
-isolated from the permanent KB - they only ever surface for the thread_id
-that uploaded them. route_after_classification also gets a bypass: if the
-router says out_of_scope but this thread has an uploaded doc, we still
-attempt retrieval, since the router only knows the fixed 5-domain KB and
-has no visibility into session uploads.
+Priority 1 (Dynamic Document Ingestion) rewrite: retrieve_node and
+decompose_retrieve_node both look up this thread's session index (if any)
+via ingestion/session_store.py and pass it into hybrid_retrieve(), which
+fuses session chunks into the SAME RRF+rerank ranking as the permanent
+corpus - there is no separate retrieval path for uploads, and no
+concatenation after the fact. This also closes the previous gap where
+decompose_retrieve_node never checked for uploads at all: both entry
+points now share one retrieval call shape.
 """
 import logging
 from langchain_core.prompts import ChatPromptTemplate
 
-from ingestion.vectorstore import load_vectorstore
 from ingestion.hybrid_retriever import hybrid_retrieve
-from ingestion.session_store import has_session_doc, session_retrieve
+from ingestion.session_store import has_session_doc, get_session_vectorstore, get_session_bm25
 from graph.state import RAGState
 from graph.router import route_query
 from llm.task_router import get_llm
@@ -94,19 +93,31 @@ def _build_labeled_context(docs) -> str:
     )
 
 
+def _get_session_retrieval_kwargs(thread_id: str) -> dict:
+    """Looks up this thread's session index (uploaded doc), if any, and returns
+    the kwargs hybrid_retrieve() needs to fuse it into the unified ranking.
+    Returns an empty dict if the thread has no upload - hybrid_retrieve()
+    behaves identically to the permanent-corpus-only case in that scenario."""
+    if not thread_id or not has_session_doc(thread_id):
+        return {}
+    session_vectorstore = get_session_vectorstore(thread_id)
+    session_bm25, session_chunks = get_session_bm25(thread_id)
+    return {
+        "session_vectorstore": session_vectorstore,
+        "session_bm25": session_bm25,
+        "session_chunks": session_chunks,
+    }
+
+
 def retrieve_node(state: RAGState) -> dict:
     """Retrieves relevant chunks using hybrid (BM25 + vector) search with cross-encoder
-    reranking. Uses HyDE for the vector search leg. Plan 3: if this thread_id has a
-    session-scoped uploaded document, its chunks are retrieved separately and placed
-    FIRST (uploaded docs are usually what the user is directly asking about), then
-    merged with the permanent-KB results."""
-    docs = hybrid_retrieve(state["rewritten_question"], fusion_k=15, final_k=RETRIEVAL_K, use_hyde=True)
-
-    thread_id = state.get("thread_id", "")
-    if thread_id and has_session_doc(thread_id):
-        session_docs = session_retrieve(thread_id, state["rewritten_question"], k=RETRIEVAL_K)
-        docs = session_docs + docs
-
+    reranking. Uses HyDE for the vector search leg. If this thread has an uploaded
+    document, its chunks are fused into the SAME ranking via hybrid_retrieve()'s
+    session_* kwargs - not retrieved separately, not concatenated afterward."""
+    session_kwargs = _get_session_retrieval_kwargs(state.get("thread_id", ""))
+    docs = hybrid_retrieve(
+        state["rewritten_question"], fusion_k=15, final_k=RETRIEVAL_K, use_hyde=True, **session_kwargs
+    )
     return {"retrieved_docs": docs}
 
 
@@ -199,11 +210,16 @@ def direct_answer_node(state: RAGState) -> dict:
 
 
 def decompose_retrieve_node(state: RAGState) -> dict:
-    """Retrieves separately for each sub-question, then combines results."""
+    """Retrieves separately for each sub-question, then combines results.
+    Priority 1 fix: now also fuses this thread's session doc (if any) into
+    EVERY sub-question's retrieval, via the same hybrid_retrieve() call
+    shape as retrieve_node - previously this path never checked for uploads
+    at all."""
+    session_kwargs = _get_session_retrieval_kwargs(state.get("thread_id", ""))
     all_docs = []
     seen_content = set()
     for sub_q in state["sub_questions"]:
-        docs = hybrid_retrieve(sub_q, fusion_k=15, final_k=3)
+        docs = hybrid_retrieve(sub_q, fusion_k=15, final_k=3, **session_kwargs)
         for doc in docs:
             if doc.page_content not in seen_content:
                 all_docs.append(doc)
@@ -213,7 +229,7 @@ def decompose_retrieve_node(state: RAGState) -> dict:
 
 def route_after_classification(state: RAGState) -> str:
     """Conditional edge: decides graph path based on router category.
-    Plan 3: if the router says out_of_scope but this thread has an uploaded
+    If the router says out_of_scope but this thread has an uploaded
     document, we still attempt retrieval - the router only knows the fixed
     5-domain KB, so out_of_scope here means "not one of the 5 domains", not
     "definitely unanswerable"."""
