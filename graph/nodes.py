@@ -22,6 +22,22 @@ corpus - there is no separate retrieval path for uploads, and no
 concatenation after the fact. This also closes the previous gap where
 decompose_retrieve_node never checked for uploads at all: both entry
 points now share one retrieval call shape.
+
+Priority 1 hardening (post-verification fix):
+1. route_after_classification no longer hard-stops at out_of_scope_node when
+   the router returns "out_of_scope" for a KB-domain question it just failed
+   to topic-match (e.g. "rare earth magnets" not obviously matching
+   "economics" to the router LLM). Retrieval + grade_documents_node (CRAG)
+   are a far stronger, evidence-based signal than one router LLM guess, so
+   retrieval now always runs and grading is the real gate. A genuinely
+   out-of-scope question will still correctly fail grading after retries and
+   land on out_of_scope_node - this just removes a false negative from a
+   single-point-of-failure classification step.
+2. RETRIEVAL_K raised 4 -> 6 and PROMPT_TEMPLATE tightened so multi-part
+   "compare X vs Y vs Z" questions (e.g. Govern/Map/Measure) get enough
+   chunks and the model states the answer directly when the context
+   supports it, instead of hedging ("not explicitly stated") when the
+   information is actually present but split across passages.
 """
 import logging
 from langchain_core.prompts import ChatPromptTemplate
@@ -35,7 +51,7 @@ from llm.errors import AllProvidersFailedError
 
 logger = logging.getLogger("llm_manager")
 
-RETRIEVAL_K = 4
+RETRIEVAL_K = 6  # was 4 - gives multi-part/compare questions enough chunk coverage
 MAX_RETRIES = 2
 
 ALL_PROVIDERS_DOWN_MESSAGE = "All configured LLM providers are currently unavailable. Please try again shortly."
@@ -44,6 +60,10 @@ PROMPT_TEMPLATE = """You are a helpful assistant answering questions using ONLY 
 Synthesize an answer from the relevant parts of the context, even if the information is spread across
 multiple passages or is only partially related. Only say "I don't have enough information to answer that"
 if the context truly contains nothing related to the question.
+
+If the context contains the answer, even partially or across multiple passages, state it directly and
+confidently - do not say "not explicitly stated" or hedge if the relevant information is present. Synthesize
+across passages rather than declaring the answer missing.
 
 Each passage below is labeled [Source N]. When you use information from a passage, cite it inline with
 its label, e.g. "AI risks include bias and security concerns [Source 1]." Cite every factual claim.
@@ -229,20 +249,31 @@ def decompose_retrieve_node(state: RAGState) -> dict:
 
 def route_after_classification(state: RAGState) -> str:
     """Conditional edge: decides graph path based on router category.
-    If the router says out_of_scope but this thread has an uploaded
-    document, we still attempt retrieval - the router only knows the fixed
-    5-domain KB, so out_of_scope here means "not one of the 5 domains", not
-    "definitely unanswerable"."""
+
+    FIXED: previously, an "out_of_scope" verdict only proceeded to retrieval
+    if the thread happened to have an uploaded doc - otherwise it hard-stopped
+    at out_of_scope_node, meaning a single router LLM misclassification (e.g.
+    a niche in-KB subtopic like rare-earth magnets not obviously reading as
+    "economics" to the router) could permanently block a real, in-KB answer
+    with no recourse.
+
+    Now, retrieval always runs regardless of category, and check_relevance_node
+    + grade_documents_node (CRAG) - which check the actual retrieved evidence,
+    not a topic guess - are the real gate for whether the question is
+    answerable. A genuinely out-of-scope question still correctly lands on
+    out_of_scope_node after failing grading through MAX_RETRIES reformulation
+    attempts (see route_after_grading below). This trades a small amount of
+    wasted retrieval compute on true out-of-scope questions for eliminating
+    false negatives on in-KB questions the router mis-tagged.
+    """
     category = state["route_category"]
     if category == "direct":
         return "direct_answer"
     elif category == "decompose":
         return "decompose_retrieve"
-    elif category == "out_of_scope":
-        if state.get("has_uploaded_doc"):
-            return "retrieve"
-        return "out_of_scope"
     else:
+        # "simple" and "out_of_scope" both go through retrieval now -
+        # grading is the real arbiter, not the router's topic guess.
         return "retrieve"
 
 
