@@ -206,8 +206,11 @@ def update_history_node(state: RAGState) -> dict:
 
 
 def router_node(state: RAGState) -> dict:
-    """Classifies the rewritten question into a routing category."""
-    result = route_query(state["rewritten_question"])
+    """Classifies the rewritten question into a routing category.
+    FIX: now passes has_uploaded_doc through to route_query, so the router
+    can classify a question mixing the uploaded doc + a permanent-KB domain
+    as "decompose" instead of only recognizing the fixed 5 topics."""
+    result = route_query(state["rewritten_question"], has_uploaded_doc=state.get("has_uploaded_doc", False))
     return {"route_category": result["category"], "sub_questions": result["sub_questions"]}
 
 

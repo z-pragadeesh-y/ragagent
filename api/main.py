@@ -39,6 +39,33 @@ doc is embedded into a session-scoped Chroma collection keyed by thread_id
 _build_initial_state now also seeds thread_id and has_uploaded_doc onto
 graph state, since graph/nodes.py's retrieve_node needs thread_id to look
 up whether this conversation has a session doc to merge into retrieval.
+
+FIX (large-upload 504 timeout): /upload was previously synchronous - the
+whole request (save file -> extract text -> markdown_generator's sequential
+windowed LLM calls -> chunk -> embed) had to complete inside ONE HTTP
+request, so any document needing enough windows to exceed Cloud Run's
+request timeout (900s) failed with a 504, no matter how high that timeout
+was set - the real bottleneck is unbounded, timeout-ceiling-agnostic work
+happening synchronously inside a request/response cycle.
+
+/upload now returns almost immediately with {"status": "processing"} and
+kicks off ingestion in a background thread. A new in-memory status table
+(_upload_status) tracks each thread_id's progress; GET /upload/status/
+{thread_id} lets the frontend poll until status flips to "ready" or "error".
+This is intentionally a simple in-process dict, not a database/queue - safe
+because Cloud Run is running with --max-instances=1 (single container, see
+Cloud Run migration notes), so there's no multi-instance consistency
+problem. If max-instances is ever raised above 1, this table needs to move
+to a shared store (Redis, Firestore, etc.) since each instance would only
+see its own in-memory copy.
+
+FRONTEND NOTE: this is a backend-only fix. The frontend's upload flow must
+be updated to (1) read {"status": "processing"} from the initial POST
+/upload response instead of expecting {"status": "ingested"} immediately,
+and (2) poll GET /upload/status/{thread_id} (e.g. every 2-3s) until it sees
+{"status": "ready"} or {"status": "error"}, before allowing the user to ask
+questions against the upload. Until the frontend is updated to poll, uploads
+will appear to "hang" in the UI even though they're now succeeding server-side.
 """
 import json
 import tempfile
@@ -86,6 +113,12 @@ cache = get_cache()
 
 ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".txt", ".md"}
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB - generous for text/policy-doc-sized PDFs
+
+# In-memory upload status table: thread_id -> {"status": ..., "filename": ...,
+# "chunks_stored": ..., "error": ...}. See module docstring FIX note above
+# for why this is safe only at --max-instances=1.
+_upload_status: dict = {}
+_upload_status_lock = threading.Lock()
 
 
 class ChatRequest(BaseModel):
@@ -246,6 +279,33 @@ async def chat_stream(request: ChatRequest):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+def _ingest_in_background(thread_id: str, tmp_path: Path, filename: str) -> None:
+    """Runs the actual (potentially slow) ingestion pipeline outside any HTTP
+    request/response cycle, so there is no timeout ceiling on it anymore.
+    Updates _upload_status when done (or on failure) so /upload/status can
+    report progress. Always cleans up the temp file, success or failure."""
+    try:
+        chunk_count = build_session_vectorstore(thread_id, tmp_path, filename)
+        with _upload_status_lock:
+            _upload_status[thread_id] = {
+                "status": "ready",
+                "filename": filename,
+                "chunks_stored": chunk_count,
+                "error": None,
+            }
+    except Exception as exc:
+        logger_msg = str(exc)
+        with _upload_status_lock:
+            _upload_status[thread_id] = {
+                "status": "error",
+                "filename": filename,
+                "chunks_stored": 0,
+                "error": logger_msg,
+            }
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 @app.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
@@ -258,6 +318,11 @@ async def upload_document(
     conversation. If thread_id isn't provided, a new one is generated - the
     frontend should always send the returned thread_id back on /chat so the
     uploaded doc is actually visible to that conversation's retrieval.
+
+    FIX: this endpoint now only validates and saves the file, then hands
+    off the actual (slow, previously timeout-prone) ingestion work to a
+    background thread and returns immediately with status "processing".
+    Call GET /upload/status/{thread_id} to poll until ingestion finishes.
     """
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_UPLOAD_EXTENSIONS:
@@ -279,21 +344,38 @@ async def upload_document(
             )
         tmp.write(contents)
 
-    try:
-        chunk_count = await run_in_threadpool(
-            build_session_vectorstore, thread_id, tmp_path, file.filename
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    with _upload_status_lock:
+        _upload_status[thread_id] = {
+            "status": "processing",
+            "filename": file.filename,
+            "chunks_stored": 0,
+            "error": None,
+        }
+
+    threading.Thread(
+        target=_ingest_in_background,
+        args=(thread_id, tmp_path, file.filename),
+        daemon=True,
+    ).start()
 
     return {
         "thread_id": thread_id,
         "filename": file.filename,
-        "chunks_stored": chunk_count,
-        "status": "ingested",
+        "status": "processing",
     }
+
+
+@app.get("/upload/status/{thread_id}")
+async def upload_status(thread_id: str):
+    """Poll this after /upload to find out when ingestion finishes. Returns
+    status: "processing" | "ready" | "error". Frontend should poll every
+    2-3s until it sees "ready" or "error", then allow/refuse questions
+    against the upload accordingly."""
+    with _upload_status_lock:
+        status = _upload_status.get(thread_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="No upload found for this thread_id")
+    return {"thread_id": thread_id, **status}
 
 
 @app.delete("/upload/{thread_id}")
@@ -302,6 +384,8 @@ async def delete_upload(thread_id: str):
     ends, or when the user explicitly wants to remove their uploaded doc
     without ending the whole conversation."""
     await run_in_threadpool(delete_session_vectorstore, thread_id)
+    with _upload_status_lock:
+        _upload_status.pop(thread_id, None)
     return {"thread_id": thread_id, "status": "deleted"}
 
 
