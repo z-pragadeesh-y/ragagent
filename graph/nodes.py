@@ -175,6 +175,32 @@ def route_after_relevance_check(state: RAGState) -> str:
     return "generate" if state["is_relevant"] else "out_of_scope"
 
 
+NO_INFO_PHRASE = "i don't have enough information to answer that"
+
+
+def route_after_generate(state: RAGState) -> str:
+    """
+    Priority 4 safety net: grade_documents_node's single-call LLM grading can
+    occasionally false-positive ("yes, relevant") on chunks that are actually
+    unrelated (e.g. climate-report chunks passing grading for a weather
+    question) - when that happens, generate_node correctly and honestly
+    produces its instructed refusal phrase (PROMPT_TEMPLATE's "I don't have
+    enough information to answer that"), but without this check that dead-end
+    answer would just be returned directly, since grading technically
+    "passed" and never routes through out_of_scope/web_search_node at all.
+
+    This catches that exact refusal phrase and redirects to out_of_scope
+    (graph/web_search_node.py) instead - giving the question a real shot at
+    a web-search answer rather than silently defeating Priority 4's purpose
+    whenever the grader has a false positive. Does NOT touch grading logic
+    itself; this is a downstream safety net, not a grading fix.
+    """
+    answer = state.get("answer", "").strip().lower()
+    if NO_INFO_PHRASE in answer:
+        return "out_of_scope"
+    return "citation"
+
+
 def rewrite_query_node(state: RAGState) -> dict:
     """Rewrites the raw question into a clearer, standalone, retrieval-friendly form.
     SIMPLE lane: NVIDIA -> local (Groq excluded to protect its quota)."""

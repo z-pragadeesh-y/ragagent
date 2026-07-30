@@ -37,6 +37,9 @@ class ProviderSettings:
     log_to_file: bool = os.getenv("LLM_LOG_TO_FILE", "false").lower() == "true"
     log_file_path: str = os.getenv("LLM_LOG_FILE_PATH", "logs/llm_manager.log")
 
+    # --- Tavily (Priority 4: web search fallback for out-of-scope questions) ---
+    tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
+
 
 def get_settings() -> ProviderSettings:
     """Returns a fresh settings snapshot from current environment variables."""

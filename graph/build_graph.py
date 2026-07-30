@@ -5,6 +5,18 @@ rewrite -> injection_guard -> [blocked -> update_history | router -> [direct_ans
 retrieve -> check_relevance -> grade_documents -> (generate -> citation -> scope_guard |
 reformulate_query -> retrieve loop | out_of_scope) | decompose_retrieve -> generate ->
 citation -> scope_guard]] -> update_history
+
+Priority 4: the "out_of_scope" node target is now graph/web_search_node.py's
+web_search_node (a real Tavily web search attempt, falling back to the old
+fixed refusal message if search is unavailable/fails/returns nothing) instead
+of nodes.py's out_of_scope_node. Both route_after_relevance_check and
+route_after_grading still return the string "out_of_scope" unchanged - only
+what that string maps to in the graph changed, so no routing-function edits
+were needed. "out_of_scope" -> citation -> scope_guard -> update_history now
+(previously out_of_scope -> update_history directly), matching the generate
+path's shape, since web_search_node can populate retrieved_docs and citation
+needs to run over them; citation_node already handles the empty-docs case
+(the fixed-refusal fallback) as a no-op passthrough with no changes needed.
 """
 import sqlite3
 from langgraph.graph import StateGraph, START, END
@@ -12,13 +24,14 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from graph.citation_node import citation_node
 from graph.injection_guard_node import injection_guard_node, route_after_injection_check
 from graph.scope_guard_node import scope_guard_node
+from graph.web_search_node import web_search_node
 from graph.state import RAGState
 from graph.nodes import (
     retrieve_node,
     check_relevance_node,
     generate_node,
-    out_of_scope_node,
     route_after_relevance_check,
+    route_after_generate,
     rewrite_query_node,
     update_history_node,
     router_node,
@@ -46,7 +59,7 @@ def build_graph():
     workflow.add_node("generate", generate_node)
     workflow.add_node("citation", citation_node)
     workflow.add_node("scope_guard", scope_guard_node)
-    workflow.add_node("out_of_scope", out_of_scope_node)
+    workflow.add_node("out_of_scope", web_search_node)  # Priority 4: real web search, not a fixed refusal
     workflow.add_node("update_history", update_history_node)
 
     workflow.add_edge(START, "rewrite_query")
@@ -92,15 +105,26 @@ def build_graph():
 
     workflow.add_edge("direct_answer", "update_history")
 
-    # generate -> citation (validates + attaches References) -> scope_guard
-    # (output guardrail: catches opinion/advice drift outside the 5-domain
-    # factual scope, discarding answer+citations if flagged) -> update_history.
-    # direct_answer/out_of_scope never had retrieved_docs and skip both.
-    workflow.add_edge("generate", "citation")
+    # generate -> route_after_generate: a false-positive CRAG grading pass can
+    # still leave generate_node with nothing real to say (see nodes.py's
+    # route_after_generate docstring) - that exact refusal phrase redirects to
+    # out_of_scope (web_search_node) instead of dead-ending, otherwise proceeds
+    # to citation as normal. out_of_scope(web_search_node) -> citation
+    # (validates + attaches References, real KB or real web metadata either
+    # way) -> scope_guard (output guardrail: catches ungrounded opinion/advice
+    # drift on top of either kind of answer - see scope_guard_node.py's
+    # Priority 4 update) -> update_history. direct_answer never has
+    # retrieved_docs and skips both; citation_node already no-ops cleanly when
+    # retrieved_docs is empty (web_search_node's fixed-refusal fallback case).
+    workflow.add_conditional_edges(
+        "generate",
+        route_after_generate,
+        {"citation": "citation", "out_of_scope": "out_of_scope"},
+    )
+    workflow.add_edge("out_of_scope", "citation")
     workflow.add_edge("citation", "scope_guard")
     workflow.add_edge("scope_guard", "update_history")
 
-    workflow.add_edge("out_of_scope", "update_history")
     workflow.add_edge("update_history", END)
 
     conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)

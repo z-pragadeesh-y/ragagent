@@ -1,0 +1,7 @@
+.git
+.gitignore
+.chroma_sessions/
+data/uploaded_markdown/
+__pycache__/
+*.pyc
+venv/

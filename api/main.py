@@ -109,6 +109,8 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from graph.build_graph import build_graph
+from graph.nodes import ALL_PROVIDERS_DOWN_MESSAGE
+from graph.web_search_node import KB_ONLY_FALLBACK_MESSAGE, NO_WEB_RESULTS_MESSAGE
 from api.semantic_cache import get_cache
 from feedback.feedback_logger import log_feedback
 from ingestion.session_store import (
@@ -154,6 +156,24 @@ class ChatRequest(BaseModel):
     thread_id: Optional[str] = None
 
 
+# Priority 4 bug fix: these are all TRANSIENT failure fallbacks (an LLM
+# provider outage, or - as actually happened during Priority 4 testing - a
+# local DNS resolution failure making Tavily unreachable), never a genuine,
+# stable answer to the question. Caching one of these means every future
+# ask of a similar question serves the SAME transient failure forever, even
+# long after the underlying provider/network issue has resolved itself.
+# Both cache.set() call sites below check this before caching.
+_UNCACHEABLE_ANSWERS = {
+    ALL_PROVIDERS_DOWN_MESSAGE,
+    KB_ONLY_FALLBACK_MESSAGE,
+    NO_WEB_RESULTS_MESSAGE,
+}
+
+
+def _is_cacheable(answer: str) -> bool:
+    return answer not in _UNCACHEABLE_ANSWERS
+
+
 # Every node name that can appear in a graph.stream() update, mapped to a
 # stable frontend key + human label. Keeping this list explicit (rather than
 # titleizing node_name on the fly) means an unrecognized node name from a
@@ -172,7 +192,7 @@ NODE_STAGE_META = {
     "generate": {"key": "generate", "label": "Generate"},
     "citation": {"key": "citation", "label": "Attach citations"},
     "scope_guard": {"key": "scope_guard", "label": "Scope guard"},
-    "out_of_scope": {"key": "out_of_scope", "label": "Out of scope"},
+    "out_of_scope": {"key": "out_of_scope", "label": "Web search (Priority 4)"},
     "update_history": {"key": "update_history", "label": "Update history"},
 }
 
@@ -187,6 +207,18 @@ def _serialize_node_update(node_name: str, node_output: dict) -> dict:
         return {
             "doc_count": len(docs),
             "sources": sorted({d.metadata.get("source", "unknown") for d in docs}),
+        }
+    if node_name == "out_of_scope":
+        # Priority 4: this node now runs a real Tavily web search - surface
+        # the same doc_count/sources shape as retrieve, so the Inspector can
+        # show "(3 web results)" instead of nothing. An empty docs list here
+        # means the fixed-refusal fallback fired (no API key / search failed
+        # / zero results), which the frontend can render distinctly.
+        docs = node_output.get("retrieved_docs", [])
+        return {
+            "doc_count": len(docs),
+            "sources": [d.metadata.get("source", "unknown") for d in docs],
+            "used_web_search": len(docs) > 0,
         }
     if node_name == "check_relevance":
         return {"is_relevant": node_output.get("is_relevant", False)}
@@ -307,7 +339,9 @@ async def chat(request: ChatRequest):
 
     result = await run_in_threadpool(_run_graph_sync, request.question, thread_id, is_new_thread)
 
-    cache.set(request.question, result)
+    if _is_cacheable(result["answer"]):
+        cache.set(request.question, result)
+
     return {
         "answer": result["answer"],
         "citations": result.get("citations", []),
@@ -350,7 +384,8 @@ def _stream_graph_worker(question: str, thread_id: str, is_new_thread: bool, q: 
             "is_injection": final_state.get("is_injection", False),
             "scope_flagged": final_state.get("scope_flagged", False),
         }
-        cache.set(question, result)
+        if _is_cacheable(result["answer"]):
+            cache.set(question, result)
         _fire_feedback_log(thread_id, question, final_state)
 
         q.put({

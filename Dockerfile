@@ -34,7 +34,11 @@ RUN pip install --no-cache-dir torch==2.12.1 --index-url https://download.pytorc
 # Now install everything else normally. torch==2.12.1 is already satisfied
 # above, so pip won't try to reinstall the GPU version for it here.
 RUN pip install --no-cache-dir -r requirements.txt
-
+# Pre-download models into the image so the container never needs
+# network access to Hugging Face at runtime (avoids rate-limit failures
+# and speeds up cold starts significantly).
+RUN python -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 # --- Now copy the actual application code ---
 # This layer changes every time you edit code, so it's placed last -
 # keeps the expensive dependency layer above cached and untouched.
@@ -43,11 +47,12 @@ COPY . .
 # --- Document which port the app listens on ---
 # This is metadata only (doesn't actually publish the port) - actual
 # port mapping happens with `docker run -p` later.
-EXPOSE 8000
 
 # --- The command that runs when the container starts ---
 # --host 0.0.0.0 is mandatory in Docker: 127.0.0.1 (localhost) inside a
 # container is only reachable from INSIDE that container. 0.0.0.0 means
 # "listen on all network interfaces," which lets Docker's port mapping
 # actually forward traffic in from outside.
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+EXPOSE 8080
+CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}
