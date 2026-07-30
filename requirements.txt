@@ -1,4 +1,4 @@
-﻿# RAGAgent - Python dependencies
+# RAGAgent - Python dependencies
 # Trimmed to packages actually imported by graph/, ingestion/, llm/, api/, eval/, feedback/
 # Pinned to exact working versions confirmed in the development environment.
 
@@ -30,4 +30,5 @@ pandas==2.3.3
 # --- Config / environment ---
 python-dotenv==1.2.2
 pypdf==5.1.0
-python-multipart==0.0.20tavily-python==0.7.26
+python-multipart==0.0.20
+tavily-python==0.7.26
