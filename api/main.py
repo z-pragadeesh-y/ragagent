@@ -111,6 +111,7 @@ from pydantic import BaseModel
 from graph.build_graph import build_graph
 from graph.nodes import ALL_PROVIDERS_DOWN_MESSAGE
 from graph.web_search_node import KB_ONLY_FALLBACK_MESSAGE, NO_WEB_RESULTS_MESSAGE
+from llm.errors import ProviderConfigError, AllProvidersFailedError
 from api.semantic_cache import get_cache
 from feedback.feedback_logger import log_feedback
 from ingestion.session_store import (
@@ -172,6 +173,18 @@ _UNCACHEABLE_ANSWERS = {
 
 def _is_cacheable(answer: str) -> bool:
     return answer not in _UNCACHEABLE_ANSWERS
+
+
+# Maps internal exception types to a clean, user-safe message. Never expose
+# raw exception text to the client (e.g. ProviderConfigError's message
+# literally names the provider and says an API key is bad) - that's an
+# internal config detail, not something the end user can act on or should see.
+def _friendly_error_message(exc: Exception) -> str:
+    if isinstance(exc, ProviderConfigError):
+        return "Our AI provider is temporarily unavailable. Please try again shortly."
+    if isinstance(exc, AllProvidersFailedError):
+        return "We're having trouble reaching our AI providers right now. Please try again in a moment."
+    return "Something went wrong processing your request. Please try again."
 
 
 # Every node name that can appear in a graph.stream() update, mapped to a
@@ -337,7 +350,11 @@ async def chat(request: ChatRequest):
     is_new_thread = request.thread_id is None
     thread_id = request.thread_id or str(uuid.uuid4())
 
-    result = await run_in_threadpool(_run_graph_sync, request.question, thread_id, is_new_thread)
+    try:
+        result = await run_in_threadpool(_run_graph_sync, request.question, thread_id, is_new_thread)
+    except (ProviderConfigError, AllProvidersFailedError) as exc:
+        print(f"[chat] provider failure: {exc!r}")
+        raise HTTPException(status_code=503, detail=_friendly_error_message(exc))
 
     if _is_cacheable(result["answer"]):
         cache.set(request.question, result)
@@ -395,7 +412,10 @@ def _stream_graph_worker(question: str, thread_id: str, is_new_thread: bool, q: 
             **result,
         })
     except Exception as exc:
-        q.put({"type": "error", "error": str(exc)})
+        # Log the real exception server-side (visible in Cloud Run logs);
+        # only the friendly message reaches the client over SSE.
+        print(f"[chat_stream] worker failed: {exc!r}")
+        q.put({"type": "error", "error": _friendly_error_message(exc)})
     finally:
         q.put(None)  # sentinel: no more events
 
