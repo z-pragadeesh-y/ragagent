@@ -11,6 +11,14 @@ This was built as a learning project to understand how a RAG system evolves from
 
 The backend runs on Cloud Run's free tier with scale-to-zero, so the very first request after a period of inactivity can take up to a couple of minutes while the container cold-starts (loading the embedding model, reranker, and LLM manager) — subsequent requests are fast. This is an intentional cost trade-off, not a bug.
 
+## 🗺️ Architecture Diagram
+
+An interactive, explorable architecture diagram is available — zoom, pan, trace request routes, and step through guided views of the pipeline (chat flow, hybrid retrieval, LLM failover).
+
+👉 **[View Interactive Architecture Diagram](docs/architecture.html)**
+
+*(GitHub renders `.html` files as source, not live, when browsing the repo — download the file or open it locally in a browser for the full interactive experience. See below for enabling GitHub Pages to make this link open live instead.)*
+
 ## Features
 
 - **Hybrid Retrieval** — combines BM25 keyword search and dense vector search using Reciprocal Rank Fusion, then reranks results with a cross-encoder model
@@ -93,14 +101,15 @@ eval/                      Golden evaluation set and custom evaluation metrics
 feedback/                  Live query/answer logging
 data/raw/                  Source knowledge base documents
 data/uploaded_markdown/    Persisted, structured markdown for user-uploaded documents
+docs/                      Interactive architecture diagram
 ragagent-frontend/         React (Vite) frontend — separate GitHub repo, deployed on Vercel
 ```
 
 ## Installation
 
 ```bash
-git clone https://github.com/z-pragadeesh-y/CONVERSATIONAL--RAGAGENT.git
-cd CONVERSATIONAL--RAGAGENT
+git clone https://github.com/z-pragadeesh-y/ragagent.git
+cd ragagent
 
 python -m venv venv
 venv\Scripts\activate          # Windows
@@ -168,6 +177,7 @@ The server runs at `http://localhost:8000` by default.
 | `POST` | `/chat/stream` | Same as above, delivered as a Server-Sent Events stream — including live, per-node pipeline progress events, not just the final answer |
 | `POST` | `/upload` | Upload a document (PDF/TXT/MD) for this conversation thread; returns immediately with `{"status": "processing"}` |
 | `GET` | `/upload/status/{thread_id}` | Poll ingestion status for an uploaded document (`processing` / `ready` / `error`) |
+| `DELETE` | `/upload` | Clear the uploaded session document for this conversation thread |
 | `GET` | `/health` | Basic health check |
 
 Example request:
