@@ -15,9 +15,7 @@ The backend runs on Cloud Run's free tier with scale-to-zero, so the very first 
 
 An interactive, explorable architecture diagram is available — zoom, pan, trace request routes, and step through guided views of the pipeline (chat flow, hybrid retrieval, LLM failover).
 
-👉 **[View Interactive Architecture Diagram](docs/architecture.html)**
-
-*(GitHub renders `.html` files as source, not live, when browsing the repo — download the file or open it locally in a browser for the full interactive experience. See below for enabling GitHub Pages to make this link open live instead.)*
+👉 **[View Interactive Architecture Diagram](https://z-pragadeesh-y.github.io/ragagent/architecture.html)**
 
 ## Features
 
