@@ -1,0 +1,3 @@
+[submodule "ragagent-frontend"]
+	path = ragagent-frontend
+	url = https://github.com/z-pragadeesh-y/ragagent-frontend.git

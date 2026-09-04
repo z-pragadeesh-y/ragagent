@@ -11,5 +11,5 @@ requirements_current.txt
 requirements_full_backup.txt
 .chroma_sessions/
 data/uploaded_markdown/
-ragagent-frontend/
+
 .agents/

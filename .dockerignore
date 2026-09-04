@@ -26,3 +26,6 @@ LICENSE
 .vscode/
 .idea/
 Thumbs.db
+
+# --- Frontend submodule (not needed in backend Docker image) ---
+ragagent-frontend/
