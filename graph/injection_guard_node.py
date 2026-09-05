@@ -89,7 +89,10 @@ def injection_guard_node(state: RAGState) -> dict:
     sets is_injection=True and a fixed refusal answer, so the graph can
     short-circuit straight to update_history, skipping router/retrieval/
     generation entirely — same short-circuit shape as out_of_scope_node."""
-    question = state["rewritten_question"]
+    # Check raw user input (and rewritten question if different) so rewrites cannot strip injection patterns
+    raw_q = state.get("question", "")
+    rewritten_q = state.get("rewritten_question", "")
+    question = f"{raw_q} {rewritten_q}".strip()
 
     flagged = _regex_prefilter_flags(question)
     detection_method = "regex" if flagged else None
