@@ -51,7 +51,7 @@ from llm.errors import AllProvidersFailedError
 
 logger = logging.getLogger("llm_manager")
 
-RETRIEVAL_K = 6  # was 4 - gives multi-part/compare questions enough chunk coverage
+RETRIEVAL_K = 8  # was 6 - gives broader chunk coverage for session uploads and multi-part questions
 MAX_RETRIES = 2
 
 ALL_PROVIDERS_DOWN_MESSAGE = "All configured LLM providers are currently unavailable. Please try again shortly."

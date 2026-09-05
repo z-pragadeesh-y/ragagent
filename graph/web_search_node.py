@@ -78,19 +78,23 @@ def _search_web(query: str, max_results: int = 5) -> list[Document]:
     if client is None:
         return []
 
+    results = []
     try:
-        # search_depth="advanced" does a meaningfully deeper/better-ranked
-        # search than Tavily's "basic" default - found necessary after live
-        # testing showed "basic" returning generic dictionary-definition
-        # results for a specific-topic query (e.g. a TV show title) that
-        # "advanced" resolves correctly.
         response = client.search(query=query, max_results=max_results, search_depth="advanced")
+        results = response.get("results", [])
     except Exception as exc:
-        logger.warning("web_search_node: Tavily search failed: %s", exc)
-        return []
+        logger.warning("web_search_node: Tavily search (advanced) failed (%s), trying basic", exc)
+
+    if not results:
+        try:
+            response = client.search(query=query, max_results=max_results, search_depth="basic")
+            results = response.get("results", [])
+        except Exception as exc:
+            logger.warning("web_search_node: Tavily search (basic) failed (%s)", exc)
+            return []
 
     docs = []
-    for result in response.get("results", []):
+    for result in results:
         content = result.get("content", "")
         if not content:
             continue

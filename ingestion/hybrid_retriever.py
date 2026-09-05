@@ -142,6 +142,16 @@ def hybrid_retrieve(
             chunk = session_chunks[i]
             content_to_doc.setdefault(chunk.page_content, chunk)
 
+        # Exact phrase match boost for specific section/article references (e.g. "Article 2", "Section 12")
+        exact_pattern = re.search(r"\b(article|section|part|chapter)\s*(\d+)\b", query, re.IGNORECASE)
+        if exact_pattern:
+            target_phrase = exact_pattern.group(0).lower()
+            for chunk in session_chunks:
+                if target_phrase in chunk.page_content.lower():
+                    if chunk.page_content not in bm25_ids:
+                        bm25_ids.insert(0, chunk.page_content)
+                    content_to_doc.setdefault(chunk.page_content, chunk)
+
     # 3. Fuse rankings via RRF - one fusion over the combined pool, no separate step for session data
     fused_scores = reciprocal_rank_fusion(vector_ids, bm25_ids)
 

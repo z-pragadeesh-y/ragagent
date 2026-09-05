@@ -30,13 +30,10 @@ World Economic Outlook), public health (WHO statistics), and AI/NLP research (Re
 {uploaded_doc_context}
 
 Classify the user's question into EXACTLY ONE of these categories:
-- "direct": greetings, meta questions about the assistant itself, or anything not requiring the knowledge base
-- "simple": a single, focused question answerable by retrieving from ONE topic area (this includes a
-  question answerable entirely from the uploaded document alone, if one is attached)
-- "decompose": a question that genuinely combines TWO OR MORE distinct sources - this includes combining
-  TWO of the 5 topics above, OR combining the uploaded document (if attached) with ONE of the 5 topics above
-- "out_of_scope": a question clearly unrelated to any of the 5 topics AND unrelated to the uploaded document
-  (if one is attached)
+- "direct": ONLY greetings (e.g. "hi", "hello", "good morning"), thank-you messages, or meta questions asking about the assistant's own capabilities/identity (e.g. "who are you?", "what can you do?")
+- "simple": a single, focused question about ONE of the 5 topics above, OR about the uploaded document (if attached)
+- "decompose": a question that genuinely combines TWO OR MORE distinct topics (combining TWO of the 5 topics above, OR combining the uploaded document with ONE of the 5 topics above)
+- "out_of_scope": ANY question about general knowledge, TV shows, movies (e.g. "what is Breaking Bad?"), places/geography (e.g. "where is Tambaram?"), sports, news, weather, or external topics NOT in the 5 topics above AND NOT in the uploaded document
 
 Respond with ONLY a JSON object, no other text, in this exact format:
 {{"category": "simple", "sub_questions": []}}
