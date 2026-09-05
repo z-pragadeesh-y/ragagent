@@ -85,6 +85,7 @@ COMPLEX_PROVIDER_BUILDERS = [
 
 SIMPLE_PROVIDER_BUILDERS = [
     ("nvidia", build_nvidia),
+    ("groq", build_groq),
     ("local_lm_studio", build_local),
 ]
 

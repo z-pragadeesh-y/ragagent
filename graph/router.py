@@ -78,8 +78,8 @@ def route_query(question: str, has_uploaded_doc: bool = False) -> dict:
         response = chain.invoke({"question": question, "uploaded_doc_context": uploaded_doc_context})
         raw = response.content.strip()
     except AllProvidersFailedError:
-        logger.error("Router: all providers failed - defaulting to out_of_scope for safety")
-        return {"category": "out_of_scope", "sub_questions": []}
+        logger.error("Router: all providers failed - defaulting to simple for safety")
+        return {"category": "simple", "sub_questions": []}
 
     # Strip markdown code fences if the model adds them despite instructions
     if raw.startswith("```"):
