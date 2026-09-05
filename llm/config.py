@@ -20,7 +20,7 @@ class ProviderSettings:
     # OpenAI-compatible endpoint - free tier at https://build.nvidia.com
     nvidia_api_key: str = os.getenv("NVIDIA_API_KEY", "")
     nvidia_base_url: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-    nvidia_model: str = os.getenv("NVIDIA_MODEL", "nvidia/llama-3.3-nemotron-super-49b-v1.5")
+    nvidia_model: str = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
 
     # --- Local LLM via LM Studio (last resort for both lanes) ---
     # LM Studio exposes an OpenAI-compatible server. Start it from
