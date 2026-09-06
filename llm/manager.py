@@ -99,12 +99,8 @@ class LLMManager(Runnable):
                     last_exception = exc
 
                     if category == ErrorCategory.AUTH_CONFIG:
-                        logger.error(f"[{self.lane_name}] '{provider_name}' failed - auth/config error: {exc}")
-                        raise ProviderConfigError(
-                            f"Provider '{provider_name}' rejected the request due to an auth/config "
-                            f"problem (bad or missing API key). Fix this in .env - it will not resolve "
-                            f"itself via retry or failover."
-                        ) from exc
+                        logger.warning(f"[{self.lane_name}] '{provider_name}' failed (auth/config error): {exc}. Trying next provider.")
+                        break  # fail over to next provider in chain
 
                     if category in (ErrorCategory.TIMEOUT, ErrorCategory.NETWORK):
                         logger.warning(
