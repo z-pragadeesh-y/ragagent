@@ -39,6 +39,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # and speeds up cold starts significantly).
 RUN python -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
 # --- Now copy the actual application code ---
 # This layer changes every time you edit code, so it's placed last -
 # keeps the expensive dependency layer above cached and untouched.

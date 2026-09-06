@@ -53,7 +53,7 @@ def _get_reranker():
     global _reranker
     if _reranker is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        _reranker = CrossEncoder(RERANKER_MODEL_NAME, device=device)
+        _reranker = CrossEncoder(RERANKER_MODEL_NAME, device=device, local_files_only=True)
     return _reranker
 
 
