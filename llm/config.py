@@ -27,7 +27,7 @@ class ProviderSettings:
     # LM Studio's "Local Server" tab before relying on this provider.
     lm_studio_base_url: str = os.getenv("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
     lm_studio_model: str = os.getenv("LM_STUDIO_MODEL", "qwen/qwen3.5-9b:2")
-    lm_studio_enabled: bool = os.getenv("LM_STUDIO_ENABLED", "true").lower() == "true"
+    lm_studio_enabled: bool = os.getenv("LM_STUDIO_ENABLED", "false").lower() == "true"
 
     # --- Failover behavior ---
     max_retries_per_provider: int = int(os.getenv("LLM_MAX_RETRIES_PER_PROVIDER", "2"))
