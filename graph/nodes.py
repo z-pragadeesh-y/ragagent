@@ -204,6 +204,11 @@ def route_after_generate(state: RAGState) -> str:
 def rewrite_query_node(state: RAGState) -> dict:
     """Rewrites the raw question into a clearer, standalone, retrieval-friendly form.
     SIMPLE lane: NVIDIA -> local (Groq excluded to protect its quota)."""
+    raw_q = state["question"].strip()
+    if (raw_q.startswith('"') and raw_q.endswith('"')) or (raw_q.startswith("'") and raw_q.endswith("'")):
+        if len(raw_q) > 2:
+            raw_q = raw_q[1:-1].strip()
+
     history_text = "\n".join(
         f"{turn['role']}: {turn['content']}" for turn in state.get("chat_history", [])
     ) or "(no previous turns)"
@@ -213,12 +218,12 @@ def rewrite_query_node(state: RAGState) -> dict:
     chain = prompt | llm
 
     try:
-        response = chain.invoke({"history": history_text, "question": state["question"]})
+        response = chain.invoke({"history": history_text, "question": raw_q})
         rewritten = response.content.strip()
     except AllProvidersFailedError:
-        rewritten = state["question"]
+        rewritten = raw_q
 
-    return {"rewritten_question": rewritten}
+    return {"question": raw_q, "rewritten_question": rewritten}
 
 
 def update_history_node(state: RAGState) -> dict:
@@ -277,32 +282,15 @@ def decompose_retrieve_node(state: RAGState) -> dict:
 
 
 def route_after_classification(state: RAGState) -> str:
-    """Conditional edge: decides graph path based on router category.
-
-    FIXED: previously, an "out_of_scope" verdict only proceeded to retrieval
-    if the thread happened to have an uploaded doc - otherwise it hard-stopped
-    at out_of_scope_node, meaning a single router LLM misclassification (e.g.
-    a niche in-KB subtopic like rare-earth magnets not obviously reading as
-    "economics" to the router) could permanently block a real, in-KB answer
-    with no recourse.
-
-    Now, retrieval always runs regardless of category, and check_relevance_node
-    + grade_documents_node (CRAG) - which check the actual retrieved evidence,
-    not a topic guess - are the real gate for whether the question is
-    answerable. A genuinely out-of-scope question still correctly lands on
-    out_of_scope_node after failing grading through MAX_RETRIES reformulation
-    attempts (see route_after_grading below). This trades a small amount of
-    wasted retrieval compute on true out-of-scope questions for eliminating
-    false negatives on in-KB questions the router mis-tagged.
-    """
+    """Conditional edge: decides graph path based on router category."""
     category = state["route_category"]
     if category == "direct":
         return "direct_answer"
     elif category == "decompose":
         return "decompose_retrieve"
+    elif category == "out_of_scope":
+        return "out_of_scope"
     else:
-        # "simple" and "out_of_scope" both go through retrieval now -
-        # grading is the real arbiter, not the router's topic guess.
         return "retrieve"
 
 
